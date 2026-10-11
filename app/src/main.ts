@@ -7,7 +7,7 @@ import {
   abilityOf, abilityReady, abilityTargets, area3, attackTargets, buildCells, canAttackFrom, canSee, cdOf, classLabel, createGame, def,
   digTargets, endEnemyTurn, endPlayerTurn, hAt, hitInfo, iceWallCells, key, living, moveAttackOption, moveAttackTargets, moveTiles, near8,
   pathTo, moveAttackTiles, performAbility, performAttack, performDig, performGuard, performMove, performMoveAttack, rangeFrom, reach, reachFrom,
-  tileAt, unitAt, unitById, heroMaxHp, extraGoblins, type PathNode, type Slot, type SquadMember
+  tileAt, unitAt, unitById, heroMaxHp, extraGoblins, coverAt, type PathNode, type Slot, type SquadMember
 } from './rules/game';
 import {
   applyBattle, canPromote, ensureSquad, heroLabel, levelOf, newCampaign, nextLevelXp, parseCampaign, promote, recruit,
@@ -18,7 +18,7 @@ import { FORGE, ICON, ITEMS, LOOT, RARITY_LABEL, fits, sellPrice, withGear, type
 import { applyAction, chooseAction, turnOrder } from './rules/ai';
 import { deserialize, serialize } from './rules/save';
 import { View } from './render/view';
-import { isMuted, play, setMuted, unlockAudio } from './ui/audio';
+import { isMusicOn, isMuted, play, setMusic, setMusicOn, setMuted, unlockAudio } from './ui/audio';
 import { Coach } from './ui/tutorial';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -101,6 +101,7 @@ function startPlayerTurn() {
 }
 
 async function afterHeroAction() {
+  setTurnLog('');
   U.pending = null;
   U.plan = null;
   U.inspect = null;
@@ -121,6 +122,9 @@ async function enemyTurn(resume: boolean) {
   if (!resume && s.phase !== 'player') return;
   U.busy = true;
   U.sel = null; U.pending = null; U.plan = null; U.inspect = null;
+  const log: GameEvent[] = [];
+  const animate = async (ev: GameEvent[]) => { log.push(...ev); await view.animate(ev, s); };
+  setTurnLog('');
   try {
     if (!resume) {
       const ev = endPlayerTurn(s);
@@ -150,7 +154,37 @@ async function enemyTurn(resume: boolean) {
     U.busy = false;
   }
   if (checkEnd()) return;
+  setTurnLog(turnSummary(log));
   startPlayerTurn();
+}
+
+// A short "what happened" line after the goblins move
+function turnSummary(ev: GameEvent[]): string {
+  const name = (id: string) => unitById(s, id)?.name ?? '';
+  const isHero = (id: string) => { const u = unitById(s, id); return !!u && u.team === 'hero' && !CLASSES[u.cls].structure; };
+  const hurt = new Map<string, number>();
+  const fell: string[] = [], bits: string[] = [];
+  let misses = 0, summons = 0, smashed = 0, frozen = 0;
+  for (const e of ev) {
+    if (e.t === 'damage' && isHero(e.id)) hurt.set(e.id, (hurt.get(e.id) ?? 0) + e.amount);
+    if (e.t === 'death' && isHero(e.id)) fell.push(name(e.id));
+    if (e.t === 'attack' && !e.hit && isHero(e.target)) misses++;
+    if (e.t === 'summon') summons++;
+    if (e.t === 'blockRemoved' && e.cause === 'smash') smashed++;
+    if (e.t === 'status' && e.status === 'thaw') frozen++;
+  }
+  hurt.forEach((n, id) => { if (!fell.includes(name(id))) bits.push(`${esc(name(id))} lost ${n} ${n === 1 ? 'heart' : 'hearts'}`); });
+  if (fell.length) bits.push(`<strong>${fell.map(esc).join(' and ')} fell</strong>`);
+  if (misses) bits.push(`${misses} ${misses === 1 ? 'attack' : 'attacks'} only grazed`);
+  if (summons) bits.push(`a Shaman summoned ${summons === 1 ? 'a goblin' : summons + ' goblins'}`);
+  if (smashed) bits.push(`a Troll smashed ${smashed === 1 ? 'a wall' : smashed + ' walls'}`);
+  if (frozen) bits.push(`${frozen} frozen ${frozen === 1 ? 'goblin' : 'goblins'} skipped the turn`);
+  return `<b>Goblins' turn:</b> ${bits.length ? bits.join(', ') + '.' : 'they moved, but nobody was hurt.'}`;
+}
+function setTurnLog(html: string) {
+  const el = $('turnLog');
+  el.innerHTML = html;
+  el.hidden = !html;
 }
 
 function checkEnd(): boolean {
@@ -164,7 +198,8 @@ function checkEnd(): boolean {
   const won = s.winner === 'hero';
   play(won ? 'win' : 'lose');
   coach.finishBattle();
-  setTimeout(() => showEnd(won, report), 900);
+  if (won) view.celebrate();
+  setTimeout(() => showEnd(won, report), won ? 1500 : 900);
   return true;
 }
 
@@ -201,7 +236,8 @@ function showEnd(won: boolean, report: BattleReport | null) {
   } else if (s.mode !== 'campaign') {
     box.innerHTML = '<div class="line">Practice battle: nobody was lost and no XP was earned.</div>';
   }
-  $('againBtn').textContent = s.mode === 'campaign' ? 'Back to the Barracks' : 'Play again';
+  $('againBtn').textContent = s.mode === 'campaign' ? 'Back to camp' : 'Play again';
+  setMusic('camp');
   $('end').hidden = false;
   $('againBtn').focus();
 }
@@ -344,6 +380,20 @@ function setPendingAbility(x: number, z: number) {
 const COL = { move: '#4c9bff', attack: '#e2553f', ability: '#ff8a3d', area: '#ffd23a', dig: '#c9a26b', heal: '#7cff8a' };
 const INSPECT = '#9b6bff';
 
+// Shields on tiles that give cover against the nearest goblin the squad can see
+function coverShields(tiles: { x: number; z: number }[]): [number, number, number][] {
+  const gobs = living(s, 'gob').filter(g => canSee(s, 'hero', g));
+  if (!gobs.length) return [];
+  const out: [number, number, number][] = [];
+  for (const t of tiles) {
+    let near = gobs[0], best = Infinity;
+    for (const g of gobs) { const d = Math.hypot(g.x - t.x, g.z - t.z); if (d < best) { best = d; near = g; } }
+    const c = coverAt(s, t.x, t.z, near.x, near.z);
+    if (c > 0) out.push([t.x, t.z, c]);
+  }
+  return out;
+}
+
 function renderHighlights() {
   view.hlClear();
   view.setLines([]);
@@ -356,7 +406,9 @@ function renderHighlights() {
   const u = sel();
   if (!u || !u.alive || !myTurn()) return;
   if (U.mode === 'move' && u.ap > 0) {
-    planReach(u).forEach(n => view.hl(n.x, n.z, COL.move, 0.42));
+    const tilesInReach = planReach(u);
+    tilesInReach.forEach(n => view.hl(n.x, n.z, COL.move, 0.42));
+    view.setShields(coverShields(U.plan ? [U.plan.end] : [...tilesInReach.values(), u]));
     if (U.plan) {
       U.plan.path.forEach(n => view.hl(n.x, n.z, tileAt(s, n.x, n.z)!.fire > 0 ? COL.attack : COL.area, 0.5));
       view.hl(U.plan.end.x, U.plan.end.z, COL.area, 0.9);
@@ -716,10 +768,20 @@ function saveCampaign() {
 }
 let setupMode: 'campaign' | 'practice' = 'campaign';
 
-const overlays = ['start', 'barracks', 'recruit', 'promote', 'fallen', 'gear', 'forge', 'setup', 'end'];
+const overlays = ['start', 'camp', 'barracks', 'recruit', 'promote', 'fallen', 'gear', 'forge', 'setup', 'end'];
 function showOnly(id: string | null) {
   for (const o of overlays) $(o).hidden = o !== id;
+  setMusic(id === null ? 'battle' : 'camp');
+  // The battle controls hide while you're in camp or the menus
+  $('app').classList.toggle('offField', id !== null);
 }
+function renderMusicBtn() {
+  const b = $('musicBtn');
+  b.textContent = `🎵 Music: ${isMusicOn() ? 'on' : 'off'}`;
+  b.setAttribute('aria-pressed', String(isMusicOn()));
+}
+renderMusicBtn();
+$('musicBtn').addEventListener('click', () => { unlockAudio(); setMusicOn(!isMusicOn()); play('click'); renderMusicBtn(); });
 
 function showStart() {
   const saved = loadSave();
@@ -727,13 +789,48 @@ function showStart() {
   if (saved) {
     const n = living(saved, 'hero').length;
     const total = saved.units.filter(u => u.team === 'hero' && !CLASSES[u.cls].structure).length;
-    $('saveInfo').textContent = `${saved.mode === 'campaign' ? 'Barracks battle' : 'Practice'} · Turn ${saved.turn} · ${cap(saved.diff)} · ${saved.theme === 'forest' ? 'Dark Forest' : 'Village'} · ${n} of ${total} heroes standing`;
+    $('saveInfo').textContent = `${saved.mode === 'campaign' ? 'Camp battle' : 'Practice'} · Turn ${saved.turn} · ${cap(saved.diff)} · ${saved.theme === 'forest' ? 'Dark Forest' : 'Village'} · ${n} of ${total} heroes standing`;
   }
+  if (!view.inCamp) campScene();
   showOnly('start');
   (saved ? $('continueBtn') : $('newBtn')).focus();
 }
 const cap = (t: string) => t[0].toUpperCase() + t.slice(1);
 const heroHp = (h: HeroRecord) => heroMaxHp(h.cls, h.path, levelOf(h.xp), gearList(h));
+
+/* Camp: the home screen between battles */
+
+function campScene() {
+  const order = [...camp.squad, ...camp.heroes.map(h => h.id).filter(id => !camp.squad.includes(id))];
+  view.loadCamp(order.map(id => camp.heroes.find(h => h.id === id)!).filter(Boolean).map(h => ({ cls: h.cls, gear: gearList(h) })));
+}
+function showCamp(note = '') {
+  const added = ensureSquad(camp);
+  saveCampaign();
+  campScene();
+  $('campGold').textContent = String(camp.gold);
+  $('campRecord').innerHTML = note || (added.length ? `${added.map(esc).join(', ')} joined for free.` : camp.battles ? `${camp.wins} ${camp.wins === 1 ? 'win' : 'wins'} in ${camp.battles} ${camp.battles === 1 ? 'battle' : 'battles'}` : 'Tap a building, or pick your squad in the Barracks.');
+  $('campForge').innerHTML = `⚒️ Forge<small>${camp.stash.length ? camp.stash.length + ' in stash' : 'Gear'}</small>`;
+  $('campTemple').innerHTML = `🕯️ Temple<small>${camp.fallen.length ? camp.fallen.length + ' fallen' : 'Fallen'}</small>`;
+  showOnly('camp');
+}
+view.onBuilding = name => {
+  if ($('camp').hidden) return;
+  unlockAudio();
+  play('click');
+  if (name === 'barracks') showBarracks();
+  else if (name === 'forge') showForge();
+  else if (name === 'temple') showFallen();
+};
+$('campBarracks').addEventListener('click', () => { play('click'); showBarracks(); });
+$('campForge').addEventListener('click', () => { play('click'); showForge(); });
+$('campTemple').addEventListener('click', () => { play('click'); showFallen(); });
+$('campBack').addEventListener('click', () => { play('click'); showStart(); });
+$('campBattle').addEventListener('click', () => {
+  play('click');
+  if (camp.squad.length !== Math.min(PROGRESS.squadSize, camp.heroes.length)) { showBarracks(); return; }
+  showSetup('campaign');
+});
 
 /* Barracks */
 
@@ -778,7 +875,7 @@ function renderBarracks(note = '') {
   const fb = $<HTMLButtonElement>('fallenBtn');
   fb.innerHTML = `Fallen<small>${camp.fallen.length || 'None yet'}</small>`;
   $('forgeBtn').innerHTML = `Forge<small>${camp.stash.length ? camp.stash.length + ' in stash' : 'Buy gear'}</small>`;
-  fb.disabled = !camp.fallen.length;
+
   $<HTMLButtonElement>('toBattleBtn').disabled = camp.squad.length !== Math.min(PROGRESS.squadSize, camp.heroes.length);
 }
 
@@ -809,7 +906,7 @@ $('heroList').addEventListener('keydown', e => {
   const card = (e.target as HTMLElement).closest<HTMLElement>('[data-hero]');
   if (card && e.target === card) { e.preventDefault(); card.click(); }
 });
-$('barracksBack').addEventListener('click', () => showStart());
+$('barracksBack').addEventListener('click', () => { play('click'); showCamp(); });
 $('toBattleBtn').addEventListener('click', () => { play('click'); showSetup('campaign'); });
 
 /* Gear and the Forge */
@@ -903,7 +1000,7 @@ $('stashItems').addEventListener('click', e => {
   saveCampaign();
   renderForge(id ? `Sold the ${ITEMS[id].name} for ${g} gold.` : '');
 });
-$('forgeBack').addEventListener('click', () => { play('click'); renderBarracks(); showOnly('barracks'); });
+$('forgeBack').addEventListener('click', () => { play('click'); showCamp(); });
 
 /* Recruit */
 
@@ -991,13 +1088,14 @@ $('promoteOk').addEventListener('click', () => {
 
 /* Fallen heroes */
 
-$('fallenBtn').addEventListener('click', () => {
-  play('click');
+$('fallenBtn').addEventListener('click', () => { play('click'); showFallen(); });
+function showFallen() {
   $('fallenList').innerHTML = camp.fallen.slice().reverse().map(f =>
     `<div class="stone"><b>${esc(f.name)}</b>, level ${f.level} ${heroLabel(f)}<br>Fell in ${f.place} in battle ${f.battle}, after ${f.battles} ${f.battles === 1 ? 'battle' : 'battles'} and ${f.kills} goblins defeated.</div>`).join('');
+  if (!camp.fallen.length) $('fallenList').innerHTML = '<div class="stone">No heroes have fallen yet. Keep it that way!</div>';
   showOnly('fallen');
-});
-$('fallenBack').addEventListener('click', () => showBarracks());
+}
+$('fallenBack').addEventListener('click', () => { play('click'); showCamp(); });
 
 /* Battle setup (difficulty and map for both; the hero picker for practice only) */
 
@@ -1012,7 +1110,7 @@ function showSetup(mode: 'campaign' | 'practice') {
   if (mode === 'campaign') {
     $('squadSummary').innerHTML = squadMembers(camp).map(m => `<div><b>${esc(m.name)}</b><small>Level ${m.level} ${heroLabel(m)}</small></div>`).join('');
   }
-  $('backBtn').textContent = mode === 'campaign' ? 'Barracks' : 'Back';
+  $('backBtn').textContent = mode === 'campaign' ? 'Camp' : 'Back';
   renderSetup();
   if (mode === 'practice') classInfo(squad[0]);
   showOnly('setup');
@@ -1090,9 +1188,9 @@ $('slots').addEventListener('input', e => {
 document.querySelectorAll<HTMLButtonElement>('[data-diff]').forEach(b => b.addEventListener('click', () => { play('click'); setup.diff = b.dataset.diff as Difficulty; renderSetup(); }));
 document.querySelectorAll<HTMLButtonElement>('[data-theme]').forEach(b => b.addEventListener('click', () => { play('click'); setup.theme = b.dataset.theme as Theme | 'random'; renderSetup(); }));
 
-$('newBtn').addEventListener('click', () => { unlockAudio(); play('click'); showBarracks(); });
+$('newBtn').addEventListener('click', () => { unlockAudio(); play('click'); showCamp(); });
 $('practiceBtn').addEventListener('click', () => { unlockAudio(); play('click'); showSetup('practice'); });
-$('backBtn').addEventListener('click', () => (setupMode === 'campaign' ? showBarracks() : showStart()));
+$('backBtn').addEventListener('click', () => (setupMode === 'campaign' ? showCamp() : showStart()));
 $('continueBtn').addEventListener('click', () => {
   unlockAudio();
   const saved = loadSave();
@@ -1114,7 +1212,7 @@ $('startBtn').addEventListener('click', () => {
   try { localStorage.setItem(SQUAD_KEY, JSON.stringify(squad)); } catch { /* ignore */ }
   begin(createGame({ seed, diff: setup.diff, theme, squad: practiceSquad(), mode: 'practice' }));
 });
-$('againBtn').addEventListener('click', () => { if (s.mode === 'campaign') showBarracks(); else showStart(); });
+$('againBtn').addEventListener('click', () => { if (s.mode === 'campaign') showCamp(); else showStart(); });
 
 function begin(state: GameState) {
   s = state;

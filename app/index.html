@@ -43,6 +43,7 @@
         <button class="btn" id="btnGuard" type="button">Overwatch<small>Ends turn</small></button>
         <button class="btn go" id="btnConfirm" type="button" disabled>Confirm</button>
       </div>
+      <div id="turnLog" role="status" hidden></div>
       <div id="hint">Tap one of your heroes to begin.</div>
     </div>
   </section>
@@ -56,8 +57,24 @@
         <button class="btn primary" id="continueBtn" type="button">Continue battle</button>
         <div class="saveInfo" id="saveInfo"></div>
       </div>
-      <button class="btn" id="newBtn" type="button">Barracks<small>Your heroes, recruits and the next battle</small></button>
+      <button class="btn" id="newBtn" type="button">Camp<small>Your heroes, gear and the next battle</small></button>
       <button class="btn" id="practiceBtn" type="button">Practice battle<small>Any heroes and paths, nothing to lose</small></button>
+      <button class="btn quiet" id="musicBtn" type="button" aria-pressed="true">🎵 Music: on</button>
+    </div>
+  </div>
+
+  <div class="overlay sheet" id="camp" hidden>
+    <div class="card wide">
+      <div class="purse"><span class="coins" id="campGold">0</span><span id="campRecord" class="muted"></span></div>
+      <div class="row3">
+        <button class="btn" id="campBarracks" type="button">🏠 Barracks<small>Heroes</small></button>
+        <button class="btn" id="campForge" type="button">⚒️ Forge<small>Gear</small></button>
+        <button class="btn" id="campTemple" type="button">🕯️ Temple<small>Fallen</small></button>
+      </div>
+      <div class="row2">
+        <button class="btn" id="campBack" type="button">Menu</button>
+        <button class="btn primary" id="campBattle" type="button">⚔️ Next battle</button>
+      </div>
     </div>
   </div>
 
@@ -76,7 +93,7 @@
         <button class="btn" id="fallenBtn" type="button">Fallen<small>&nbsp;</small></button>
       </div>
       <div class="row2">
-        <button class="btn" id="barracksBack" type="button">Back</button>
+        <button class="btn" id="barracksBack" type="button">Camp</button>
         <button class="btn primary" id="toBattleBtn" type="button">Choose battle</button>
       </div>
     </div>
@@ -129,16 +146,16 @@
       <label class="lbl" id="stashLbl">Your stash</label>
       <div class="items" id="stashItems"></div>
       <p class="muted" id="forgeNote" aria-live="polite"></p>
-      <button class="btn" id="forgeBack" type="button">Back to the Barracks</button>
+      <button class="btn" id="forgeBack" type="button">Back to camp</button>
     </div>
   </div>
 
   <div class="overlay" id="fallen" hidden>
     <div class="card wide">
-      <h2>Fallen heroes</h2>
-      <p class="muted">They fought bravely and will be remembered.</p>
+      <h2>Temple</h2>
+      <p class="muted">The Fallen Heroes wall. They fought bravely and will be remembered.</p>
       <div class="wall" id="fallenList"></div>
-      <button class="btn" id="fallenBack" type="button">Back</button>
+      <button class="btn" id="fallenBack" type="button">Back to camp</button>
     </div>
   </div>
 

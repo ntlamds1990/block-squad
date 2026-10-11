@@ -46,6 +46,14 @@ All numbers in `PROGRESS` in `balance.ts`; paths in `PATHS` / `PATHS_OF`.
 - Second abilities use `extra` on the class def; read them with `abilityOf(u, 2)` and `cdOf(u, 2)`.
 - Path win rates are checked by simulating each path as the 4th hero on Hard against its base class; every path should beat or match its base.
 
+## Gear, loot and goblins that keep up
+
+- Items live in `items.ts` (`ITEMS`, numbers per item). Slots: weapon (one class), armour, charm. `withGear` turns gear into stats; `def(u)` caches class + path + gear.
+- Commons are sold at the Forge; Rare and Epic only from loot chests. Every campaign win drops a chest (`LOOT.odds` by difficulty); stash holds 20, a full stash sells the chest.
+- Potions are drunk automatically at 1 heart and used up. Ring of Second Wind leaves 1 heart once per battle.
+- A fallen hero's gear goes back to the stash after a win and is lost after a defeat.
+- `BALANCE.adaptive`: squad power = levels above 1 + promotions + gear (common 1, rare 1.5, epic 2.5); every 3.5 points adds an extra goblin (max 9). Target: Normal stays roughly 55–75% from fresh to fully geared squads.
+
 ## After changing rules or balance
 
 1. Add or update a test in `tests/` for the rule.

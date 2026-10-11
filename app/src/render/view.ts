@@ -5,7 +5,8 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { BALANCE, CLASSES, type ClassId } from '../rules/balance';
 import type { GameEvent, GameState, Mat, Theme, Unit } from '../rules/types';
 import { MAT, BLOCK_COLOR } from './textures';
-import { buildModel, dressModel } from './models';
+import { buildModel, dressModel, type Model } from './models';
+import type { ItemId } from '../rules/items';
 import { play, type Sfx } from '../ui/audio';
 
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -26,6 +27,33 @@ interface FireFx { group: THREE.Group; x: number; z: number; cubes: THREE.Mesh[]
 const blockGeo = new THREE.BoxGeometry(1, 1, 1);
 const groundGeo = new THREE.BoxGeometry(1, 0.4, 1);
 const hlGeo = new THREE.PlaneGeometry(0.92, 0.92);
+
+// A small shield picture: half filled for half cover, fully gold for full cover
+function shieldTexture(level: number): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d')!;
+  const shape = () => {
+    g.beginPath();
+    g.moveTo(32, 4); g.lineTo(58, 12); g.lineTo(56, 34); g.quadraticCurveTo(50, 52, 32, 60); g.quadraticCurveTo(14, 52, 8, 34); g.lineTo(6, 12);
+    g.closePath();
+  };
+  shape();
+  g.fillStyle = 'rgba(20, 26, 48, 0.85)';
+  g.fill();
+  g.save();
+  shape();
+  g.clip();
+  g.fillStyle = level === 2 ? '#f2c14e' : '#9fc4ff';
+  g.fillRect(0, 0, level === 2 ? 64 : 32, 64);
+  g.restore();
+  shape();
+  g.lineWidth = 5;
+  g.strokeStyle = '#ffffff';
+  g.stroke();
+  const tex = new THREE.CanvasTexture(c);
+  return tex;
+}
 const fogGeo = new THREE.PlaneGeometry(1, 1);
 const fireGeo = new THREE.BoxGeometry(0.22, 0.22, 0.22);
 const fireMats = [0xff8a3d, 0xffd23a, 0xff5a2a].map(c => new THREE.MeshBasicMaterial({ color: c }));
@@ -57,6 +85,7 @@ export class View {
   private particles: Particle[] = [];
   private floats: Float[] = [];
   private shake = 0;
+  private lastHitFrom: { x: number; z: number } | null = null; // where the last attack came from (for knockback)
   private clock = new THREE.Clock();
   private tmp = new THREE.Vector3();
   private selRing: THREE.Mesh;
@@ -103,6 +132,10 @@ export class View {
   /* ---------- Building the world ---------- */
 
   load(s: GameState) {
+    this.inCamp = false;
+    this.signs = [];
+    this.campHeroes = [];
+    this.smoke = [];
     this.size = s.size;
     this.theme = s.theme;
     const mid = (s.size - 1) / 2;
@@ -165,6 +198,158 @@ export class View {
     }
     for (const u of s.units) if (u.alive) this.addUnit(u);
     this.updateFog();
+    this.fitCamera();
+  }
+
+  /* ---------- The camp between battles ---------- */
+
+  onBuilding: (name: string) => void = () => {};
+  private signs: { el: HTMLDivElement; pos: THREE.Vector3 }[] = [];
+  private campHeroes: Model[] = [];
+  private smoke: { m: THREE.Mesh; ph: number }[] = [];
+  inCamp = false;
+
+  // A small voxel camp: Barracks, Forge and Temple around a campfire, with the squad hanging out
+  loadCamp(heroes: { cls: ClassId; gear?: readonly ItemId[] }[]) {
+    this.inCamp = true;
+    this.size = 12;
+    this.scene.remove(this.world);
+    this.world = new THREE.Group();
+    this.scene.add(this.world);
+    this.pickables = [];
+    this.labels.innerHTML = '';
+    this.floats = [];
+    this.signs = [];
+    this.units.clear();
+    this.fires.clear();
+    this.towers.clear();
+    this.traps.clear();
+    this.stacks = [];
+    this.campHeroes = [];
+    this.smoke = [];
+    this.selected = null;
+    this.tweens.forEach(tw => tw.res());
+    this.tweens = [];
+    this.app.classList.remove('forest');
+    (this.scene.fog as THREE.Fog).color.set(0xffe2c4);
+    (this.scene.fog as THREE.Fog).near = 40;
+    (this.scene.fog as THREE.Fog).far = 80;
+    this.hemi.intensity = 0.8;
+    this.hemi.color.set(0xfff0dc);
+    this.sun.intensity = 0.8;
+    this.sun.color.set(0xffd9a8);
+    this.sun.position.set(14, 18, 12);
+    this.sun.target.position.set(5.5, 0, 5.5);
+    const W = this.world;
+    const box = (w: number, h: number, d: number, mat: THREE.Material | THREE.Material[], x: number, y: number, z: number, parent: THREE.Object3D = W) => {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+      m.position.set(x, y, z);
+      m.castShadow = true;
+      m.receiveShadow = true;
+      parent.add(m);
+      return m;
+    };
+    const color = (c: string | number, glow = false) => {
+      const m = new THREE.MeshLambertMaterial({ color: c });
+      if (glow) { m.emissive = new THREE.Color(c); m.emissiveIntensity = 0.9; }
+      return m;
+    };
+    // Island and grass
+    const baseTex = MAT.dirt.map!.clone();
+    baseTex.needsUpdate = true;
+    baseTex.wrapS = baseTex.wrapT = THREE.RepeatWrapping;
+    baseTex.repeat.set(12, 2);
+    const baseMat = new THREE.MeshLambertMaterial({ map: baseTex });
+    for (const [w, h, y] of [[12, 1.6, -1.2], [9, 1.4, -2.7], [5, 1.2, -4.0]]) box(w, h, w, baseMat, 5.5, y, 5.5).castShadow = false;
+    const groundMats = [MAT.grassSide, MAT.grassSide, MAT.grassTop, MAT.dirt, MAT.grassSide, MAT.grassSide];
+    for (let z = 0; z < 12; z++) for (let x = 0; x < 12; x++) {
+      const g = new THREE.Mesh(groundGeo, groundMats);
+      g.position.set(x, -0.2, z);
+      g.receiveShadow = true;
+      W.add(g);
+    }
+    // A dirt path from the gate to the fire
+    const pathMat = color('#b08a5a');
+    for (const [x, z] of [[5, 7], [6, 7], [5, 8], [6, 8], [5, 9], [6, 9], [5, 10], [6, 10], [5, 11], [6, 11]]) box(0.98, 0.04, 0.98, pathMat, x, 0.01, z).castShadow = false;
+
+    const building = (name: string, label: string, x: number, z: number, build: (g: THREE.Group) => void, signY: number) => {
+      const g = new THREE.Group();
+      g.position.set(x, 0, z);
+      g.userData.building = name;
+      build(g);
+      W.add(g);
+      this.pickables.push(g);
+      const el = document.createElement('div');
+      el.className = 'sign';
+      el.textContent = label;
+      this.labels.appendChild(el);
+      this.signs.push({ el, pos: new THREE.Vector3(x, signY, z) });
+    };
+    // Barracks: a long wooden hall with a red roof and a banner
+    building('barracks', '🏠 Barracks', 2.5, 2, g => {
+      box(4, 1.6, 2.6, MAT.plank, 0, 0.8, 0, g);
+      box(4.3, 0.35, 3.0, MAT.roof, 0, 1.75, 0, g);
+      box(3.7, 0.35, 2.2, MAT.roof, 0, 2.1, 0, g);
+      box(2.9, 0.35, 1.4, MAT.roof, 0, 2.45, 0, g);
+      box(0.7, 1.0, 0.1, MAT.log, 0, 0.5, 1.31, g);
+      for (const wx of [-1.3, 1.3]) box(0.5, 0.4, 0.08, color('#ffd98a', true), wx, 1.0, 1.31, g);
+      box(0.08, 1.6, 0.08, MAT.log, 2.2, 1.4, 1.2, g);
+      box(0.6, 0.4, 0.04, color('#2f6fd1'), 2.52, 1.95, 1.2, g);
+    }, 3.3);
+    // Forge: stone walls, a chimney, an anvil and a glowing fire
+    building('forge', '⚒️ Forge', 8.6, 2, g => {
+      box(2.6, 1.4, 2.4, MAT.stone, 0, 0.7, 0, g);
+      box(2.9, 0.3, 2.7, MAT.cobble, 0, 1.55, 0, g);
+      box(0.6, 1.6, 0.6, MAT.cobble, 0.8, 2.3, -0.5, g);
+      box(1.0, 0.7, 0.1, color('#ff7a2c', true), 0, 0.5, 1.21, g);
+      box(0.5, 0.25, 0.3, color('#3a3a44'), -0.2, 0.55, 1.75, g);
+      box(0.25, 0.3, 0.2, color('#3a3a44'), -0.2, 0.28, 1.75, g);
+      box(0.15, 0.15, 0.15, MAT.log, 0.6, 0.3, 1.8, g);
+      for (let i = 0; i < 4; i++) {
+        const m = box(0.25, 0.25, 0.25, new THREE.MeshLambertMaterial({ color: 0xbfbfbf, transparent: true, opacity: 0.6 }), 0.8, 3.2, -0.5, g);
+        m.castShadow = false;
+        this.smoke.push({ m, ph: i / 4 });
+      }
+    }, 3.4);
+    // Temple: white stone with pillars and a golden roof; the Fallen Heroes wall is inside
+    building('temple', '🕯️ Temple', 9.4, 7.5, g => {
+      const white = color('#e9e4d8');
+      box(2.2, 0.25, 2.6, white, 0, 0.12, 0, g);
+      for (const [px, pz] of [[-0.85, -1.05], [0.85, -1.05], [-0.85, 1.05], [0.85, 1.05], [-0.85, 0], [0.85, 0]]) box(0.25, 1.5, 0.25, white, px, 1.0, pz, g);
+      box(2.4, 0.3, 2.8, color('#f2c14e'), 0, 1.85, 0, g);
+      box(1.6, 0.3, 2.0, color('#f2c14e'), 0, 2.15, 0, g);
+      box(0.9, 0.9, 0.2, MAT.stone, 0, 0.7, -0.6, g);
+      for (const cx of [-0.3, 0.3]) box(0.08, 0.16, 0.08, color('#fff3b0', true), cx, 1.2, -0.45, g);
+    }, 2.9);
+    // Trees, hay, a fence and the campfire
+    const tree = (x: number, z: number, h = 1.4) => {
+      box(0.35, h, 0.35, MAT.log, x, h / 2, z);
+      box(1.3, 1.0, 1.3, MAT.leaves, x, h + 0.4, z);
+      box(0.8, 0.6, 0.8, MAT.leaves, x, h + 1.1, z);
+    };
+    tree(0.3, 6.5); tree(0.5, 10.4, 1.2); tree(11.2, 11, 1.6); tree(11.4, 3.8, 1.2); tree(4.8, 0.1, 1.0);
+    box(0.9, 0.7, 0.9, MAT.hay, 1.5, 0.35, 8.6); box(0.9, 0.7, 0.9, MAT.hay, 2.3, 0.35, 9.3); box(0.9, 0.7, 0.9, MAT.hay, 1.6, 1.05, 8.9);
+    for (let x = 0; x < 12; x += 1) if (x < 4 || x > 7) box(0.12, 0.6, 0.12, MAT.log, x, 0.3, 11.6);
+    box(4, 0.1, 0.08, MAT.plank, 1.5, 0.45, 11.6); box(4, 0.1, 0.08, MAT.plank, 9.5, 0.45, 11.6);
+    for (const [sx, sz] of [[-0.35, 0], [0.35, 0], [0, -0.35], [0, 0.35]]) box(0.3, 0.2, 0.3, MAT.stone, 5.5 + sx, 0.1, 6 + sz);
+    box(0.7, 0.12, 0.12, MAT.log, 5.5, 0.15, 6, W).rotation.y = 0.7;
+    this.setFire(5, 6, true);
+    const fire = this.fires.get(key(5, 6))!;
+    fire.group.position.x = 5.5;
+    const light = new THREE.PointLight(0xff9a3c, 1.2, 6);
+    light.position.set(5.5, 1, 6);
+    W.add(light);
+    // Heroes around the fire
+    const ring = heroes.slice(0, 8);
+    ring.forEach((h, i) => {
+      const a = (i / ring.length) * Math.PI * 2 + 0.4;
+      const m = buildModel(h.cls, 'hero');
+      if (h.gear?.length) dressModel(m, h.gear);
+      m.group.position.set(5.5 + Math.cos(a) * 1.7, 0, 6 + Math.sin(a) * 1.5);
+      m.group.rotation.y = Math.atan2(5.5 - m.group.position.x, 6 - m.group.position.z);
+      W.add(m.group);
+      this.campHeroes.push(m);
+    });
     this.fitCamera();
   }
 
@@ -422,7 +607,28 @@ export class View {
     this.scene.add(g);
   }
 
-  hlClear() { this.hlPool.forEach(m => { m.visible = false; }); this.hlUsed = 0; }
+  hlClear() { this.hlPool.forEach(m => { m.visible = false; }); this.hlUsed = 0; this.setShields([]); }
+
+  // Shield icons on tiles: 1 = half cover, 2 = full cover (against the nearest goblin)
+  private shieldPool: THREE.Sprite[] = [];
+  private shieldTex: THREE.CanvasTexture[] = [];
+  setShields(list: [number, number, number][]) {
+    if (!this.shieldTex.length) this.shieldTex = [1, 2].map(level => shieldTexture(level));
+    while (this.shieldPool.length < list.length) {
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.shieldTex[0], depthTest: false, transparent: true }));
+      sp.scale.set(0.6, 0.6, 1);
+      sp.renderOrder = 5;
+      this.scene.add(sp);
+      this.shieldPool.push(sp);
+    }
+    this.shieldPool.forEach((sp, i) => {
+      const it = list[i];
+      sp.visible = !!it;
+      if (!it) return;
+      (sp.material as THREE.SpriteMaterial).map = this.shieldTex[it[2] - 1];
+      sp.position.set(it[0], this.height(it[0], it[1]) + 0.3, it[1]);
+    });
+  }
 
   /* ---------- Effects ---------- */
 
@@ -446,9 +652,41 @@ export class View {
     }
   }
 
-  floatText(pos: THREE.Vector3, text: string, color = '#fff') {
+  // A soft grey cloud that swells and fades
+  puff(pos: THREE.Vector3) {
+    const mat = new THREE.MeshLambertMaterial({ color: 0xd9dce6, transparent: true, opacity: 0.85 });
+    const geo = new THREE.BoxGeometry(0.28, 0.28, 0.28);
+    const cubes: THREE.Mesh[] = [];
+    for (let i = 0; i < 7; i++) {
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(pos.x + (Math.random() - 0.5) * 0.5, pos.y + Math.random() * 0.5, pos.z + (Math.random() - 0.5) * 0.5);
+      this.scene.add(m);
+      cubes.push(m);
+    }
+    this.tween(0.6, k => {
+      mat.opacity = 0.85 * (1 - k);
+      cubes.forEach((m, i) => { m.scale.setScalar(1 + k * 1.5); m.position.y += 0.012 + i * 0.001; });
+    }).then(() => { cubes.forEach(m => this.scene.remove(m)); geo.dispose(); mat.dispose(); });
+  }
+
+  // Heroes jump for joy and confetti flies when the battle is won
+  async celebrate() {
+    const heroes = [...this.units.values()].filter(v => v.alive && v.team === 'hero' && v.cls !== 'turret' && v.cls !== 'tnt');
+    const colors = ['#f2c14e', '#4c9bff', '#7cff8a', '#ff7ab0', '#c07cff'];
+    heroes.forEach((v, i) => this.burst(new THREE.Vector3(v.x, 1.6 + v.group.position.y, v.z), colors[i % colors.length], 14, 0.08, 4));
+    for (let hop = 0; hop < 3; hop++) {
+      await this.tween(0.36, k => heroes.forEach((v, i) => {
+        const kk = Math.min(1, Math.max(0, k * 1.2 - i * 0.05));
+        v.body.position.y = Math.sin(Math.PI * kk) * 0.45;
+        v.body.rotation.y = hop === 1 ? kk * Math.PI * 2 : 0;
+      }));
+    }
+    heroes.forEach(v => { v.body.position.y = 0; v.body.rotation.y = 0; });
+  }
+
+  floatText(pos: THREE.Vector3, text: string, color = '#fff', cls = '') {
     const el = document.createElement('div');
-    el.className = 'float';
+    el.className = 'float' + (cls ? ' ' + cls : '');
     el.textContent = text;
     el.style.color = color;
     this.labels.appendChild(el);
@@ -487,6 +725,11 @@ export class View {
       m.position.copy(p);
       m.lookAt(p.clone().add(p.clone().sub(prev)));
       if (kind !== 'arrow') m.rotation.x += 0.3;
+      // Spells leave a glowing trail
+      if (kind !== 'arrow' && kind !== 'tnt' && Math.random() < 0.5) {
+        const trail = kind === 'light' ? '#fff3b0' : kind === 'hex' ? '#b48cff' : kind === 'frost' || kind === 'snow' ? '#bfe6fa' : kind === 'leaf' ? '#7cc35a' : '#ffb35a';
+        this.burst(p.clone(), trail, 1, 0.07, 0.4);
+      }
       prev.copy(p);
     });
     this.scene.remove(m);
@@ -563,6 +806,7 @@ export class View {
           await this.wait(0.25);
         }
         this.face(a, t.x, t.z);
+        this.lastHitFrom = { x: a.x, z: a.z };
         if (CLASSES[a.cls].range === 1) { sfx('swing'); await this.lunge(a, t.x, t.z); }
         else {
           sfx(e.kind === 'arrow' ? 'arrow' : e.kind === 'hex' ? 'hex' : 'bolt');
@@ -577,12 +821,29 @@ export class View {
         if (e.cause !== 'fire') v.guard = false;
         this.renderHearts(v);
         const color = e.cause === 'graze' ? '#cfd6ea' : e.cause === 'fire' ? '#ff8a3d' : e.cause === 'ability' ? '#ffd23a' : '#ffffff';
-        if (!v.hidden) this.floatText(this.headPos(v), e.label, color);
+        if (!v.hidden) this.floatText(this.headPos(v), e.label, color, e.amount >= 3 && e.cause !== 'graze' ? 'big' : '');
         sfx(e.cause === 'graze' ? 'graze' : e.cause === 'fire' ? 'fire' : 'hit');
         this.flash(v);
-        const ox = v.group.position.x;
-        await this.tween(0.18, k => { v.group.position.x = ox + Math.sin(k * Math.PI * 4) * 0.06 * (1 - k); });
+        const ox = v.group.position.x, oz = v.group.position.z;
+        if (e.cause === 'hit' && !v.hidden) {
+          // A real hit knocks the target back a little, with sparks, and a big one shakes the screen
+          this.burst(new THREE.Vector3(ox, 0.9 + v.group.position.y, oz), '#fff3b0', 6, 0.07, 3);
+          if (e.amount >= 3 && !reduceMotion) this.shake = Math.max(this.shake, 0.18);
+          const f = this.lastHitFrom;
+          const len = f ? Math.hypot(ox - f.x, oz - f.z) || 1 : 1;
+          const kx = f ? ((ox - f.x) / len) * 0.22 : 0, kz = f ? ((oz - f.z) / len) * 0.22 : 0;
+          await this.tween(0.22, k => {
+            const push = Math.sin(Math.PI * k) * (1 - k * 0.3);
+            v.group.position.x = ox + kx * push;
+            v.group.position.z = oz + kz * push;
+            v.group.rotation.x = -0.25 * Math.sin(Math.PI * k);
+          });
+          v.group.rotation.x = 0;
+        } else {
+          await this.tween(0.18, k => { v.group.position.x = ox + Math.sin(k * Math.PI * 4) * 0.06 * (1 - k); });
+        }
         v.group.position.x = ox;
+        v.group.position.z = oz;
         if (v.cls === 'tnt') v.hp = 0;
         return;
       }
@@ -595,6 +856,12 @@ export class View {
         const g = v.group;
         await this.tween(0.35, k => { g.rotation.x = (-Math.PI / 2) * ease(k); });
         this.burst(new THREE.Vector3(g.position.x, 0.5, g.position.z), v.cls === 'tnt' ? '#d33a2c' : v.team === 'hero' ? '#9fb7e0' : '#76b041', 12, 0.14, 3);
+        if (v.team === 'gob' && v.cls !== 'tnt' && v.cls !== 'turret') {
+          // Goblins go poof in a puff of smoke and drop a few coins
+          this.puff(new THREE.Vector3(g.position.x, 0.6, g.position.z));
+          this.burst(new THREE.Vector3(g.position.x, 0.7, g.position.z), '#f2c14e', 5, 0.09, 2.5);
+          if (v.cls === 'troll' && !reduceMotion) this.shake = Math.max(this.shake, 0.3);
+        }
         await this.tween(0.3, k => { g.scale.setScalar(1 - k); });
         this.world.remove(g);
         this.updateFog();
@@ -834,8 +1101,9 @@ export class View {
       const targets = this.pickables.concat([...this.units.values()].filter(v => v.alive && !v.hidden).map(v => v.group));
       for (const h of ray.intersectObjects(targets, true)) {
         let o: THREE.Object3D | null = h.object;
-        while (o && !o.userData.unitId && !o.userData.tile) o = o.parent;
+        while (o && !o.userData.unitId && !o.userData.tile && !o.userData.building) o = o.parent;
         if (!o) continue;
+        if (o.userData.building) { this.onBuilding(o.userData.building); return; }
         if (o.userData.unitId) { const v = this.units.get(o.userData.unitId)!; this.onTap(v.x, v.z); return; }
         this.onTap(o.userData.tile.x, o.userData.tile.z);
         return;
@@ -946,6 +1214,14 @@ export class View {
         cube.scale.setScalar(Math.max(0.05, 1 - k) * (1 + 0.3 * Math.sin(t * 9 + i)));
       });
     });
+    this.smoke.forEach(sm => {
+      const k = (t * 0.35 + sm.ph) % 1;
+      sm.m.position.y = 3.0 + k * 2;
+      sm.m.position.x = 0.8 + Math.sin(k * 5 + sm.ph * 9) * 0.25;
+      sm.m.scale.setScalar(0.6 + k * 1.6);
+      (sm.m.material as THREE.MeshLambertMaterial).opacity = 0.6 * (1 - k);
+    });
+    this.campHeroes.forEach((m, i) => { m.body.position.y = Math.abs(Math.sin(t * 1.8 + i * 1.7)) * 0.05; m.body.rotation.y = Math.sin(t * 0.6 + i * 2) * 0.35; });
     this.renderer.render(this.scene, this.camera);
 
     const w = this.app.clientWidth, h = this.app.clientHeight;
@@ -956,6 +1232,11 @@ export class View {
       v.label.style.display = vis ? '' : 'none';
       v.label.style.left = ((this.tmp.x + 1) / 2) * w + 'px';
       v.label.style.top = ((-this.tmp.y + 1) / 2) * h + 'px';
+    });
+    this.signs.forEach(sg => {
+      this.tmp.copy(sg.pos).project(this.camera);
+      sg.el.style.left = ((this.tmp.x + 1) / 2) * w + 'px';
+      sg.el.style.top = ((-this.tmp.y + 1) / 2) * h + 'px';
     });
     for (let i = this.floats.length - 1; i >= 0; i--) {
       const f = this.floats[i];

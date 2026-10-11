@@ -66,6 +66,16 @@ body {
   text-shadow: 0 2px 0 #000, 0 0 8px rgba(0, 0, 0, 0.6);
   white-space: nowrap;
 }
+.float.big { font-size: 30px; color: #ffe066; animation: pop 0.35s ease-out; }
+@keyframes pop { 0% { transform: translate(-50%, -50%) scale(0.4); } 60% { transform: translate(-50%, -50%) scale(1.3); } 100% { transform: translate(-50%, -50%) scale(1); } }
+.report .line { animation: slideIn 0.35s ease-out both; }
+.report .line:nth-child(2) { animation-delay: 0.08s; } .report .line:nth-child(3) { animation-delay: 0.16s; }
+.report .line:nth-child(4) { animation-delay: 0.24s; } .report .line:nth-child(5) { animation-delay: 0.32s; }
+.report .line:nth-child(n+6) { animation-delay: 0.4s; }
+.report .line.loot { animation: chest 0.7s 0.45s ease-out both; }
+@keyframes slideIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes chest { 0% { opacity: 0; transform: scale(0.6) rotate(-3deg); } 60% { opacity: 1; transform: scale(1.06) rotate(1deg); } 100% { transform: none; } }
+@media (prefers-reduced-motion: reduce) { .float.big, .report .line, .report .line.loot { animation: none; } }
 #top {
   position: absolute;
   left: 0; right: 0; top: 0;
@@ -335,3 +345,16 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 .report .line.loot.epic { border-left-color: #c07cff; background: #2b2550; }
 .purse .coins { white-space: nowrap; }
 .purse .muted { font-size: 12px; text-align: right; font-weight: 700; }
+.btn.quiet { background: transparent; box-shadow: none; color: var(--muted); min-height: 36px; font-size: 14px; }
+#turnLog { font-size: 13px; line-height: 1.35; color: var(--ink); background: #2a1f2a; border-left: 4px solid var(--gob); border-radius: 8px; padding: 6px 10px; }
+#turnLog b { color: #ff9a85; }
+
+.overlay.sheet { background: transparent; pointer-events: none; place-items: end stretch; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+.overlay.sheet > .card { pointer-events: auto; margin: auto auto 0; gap: 10px; padding: 14px 16px; background: rgba(21, 27, 48, 0.92); }
+.sign {
+  position: absolute; transform: translate(-50%, -50%); pointer-events: none; white-space: nowrap;
+  background: rgba(21, 27, 48, 0.85); border: 2px solid var(--gold); color: var(--ink); border-radius: 10px;
+  padding: 3px 8px; font-weight: 800; font-size: 13px;
+}
+#app.offField #top, #app.offField #panel { display: none; }
+#camp .row3 .btn { font-size: 15px; padding: 8px 4px; }
