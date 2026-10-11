@@ -1,14 +1,18 @@
 // The game screen: turns taps into rule actions, plays the results on the 3D view, runs the
 // goblins' turn, and saves after every move.
 import './style.css';
-import { BALANCE, CLASSES, DEFAULT_SQUAD, HERO_CLASSES, NAME_POOL, type Difficulty, type HeroClass } from './rules/balance';
+import { BALANCE, CLASSES, DEFAULT_SQUAD, HERO_CLASSES, NAME_POOL, PATHS, PATHS_OF, PROGRESS, type AbilityDef, type Difficulty, type HeroClass, type PathId } from './rules/balance';
 import type { GameEvent, GameState, Theme, Unit } from './rules/types';
 import {
-  abilityOf, abilityReady, abilityTargets, adjacent, area3, attackTargets, canAttackFrom, canSee, createGame, def,
-  digTargets, endEnemyTurn, endPlayerTurn, hAt, hitInfo, key, living, moveAttackOption, moveAttackTargets, moveTiles,
-  pathTo, performTurret, turretTargets, moveAttackTiles, performAbility, performAttack, performDig, performGuard, performMove, performMoveAttack, reach, reachFrom,
-  tileAt, unitAt, unitById, type PathNode, type SquadMember
+  abilityOf, abilityReady, abilityTargets, area3, attackTargets, buildCells, canAttackFrom, canSee, cdOf, classLabel, createGame, def,
+  digTargets, endEnemyTurn, endPlayerTurn, hAt, hitInfo, iceWallCells, key, living, moveAttackOption, moveAttackTargets, moveTiles, near8,
+  pathTo, moveAttackTiles, performAbility, performAttack, performDig, performGuard, performMove, performMoveAttack, rangeFrom, reach, reachFrom,
+  tileAt, unitAt, unitById, heroMaxHp, type PathNode, type Slot, type SquadMember
 } from './rules/game';
+import {
+  applyBattle, canPromote, ensureSquad, heroLabel, levelOf, newCampaign, nextLevelXp, parseCampaign, promote, recruit,
+  squadMembers, toggleSquad, type BattleReport, type Campaign, type HeroRecord
+} from './rules/campaign';
 import { applyAction, chooseAction, turnOrder } from './rules/ai';
 import { deserialize, serialize } from './rules/save';
 import { View } from './render/view';
@@ -19,6 +23,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 const SAVE_KEY = 'blockSquad.save';
 const SQUAD_KEY = 'blockSquad.squad';
 const SETUP_KEY = 'blockSquad.setup';
+const CAMPAIGN_KEY = 'blockSquad.campaign';
 
 const view = new View($('app'), $<HTMLCanvasElement>('scene'), $('labels'));
 
@@ -28,13 +33,12 @@ type Pending =
   | { kind: 'attack'; target: string; x: number; z: number }
   | { kind: 'moveattack'; target: string; x: number; z: number; node: PathNode }
   | { kind: 'dig'; x: number; z: number }
-  | { kind: 'ability'; x: number; z: number }
-  | { kind: 'turret'; x: number; z: number };
+  | { kind: 'ability'; x: number; z: number; slot: Slot };
 
 let s: GameState = createGame({ seed: 1, diff: 'easy', theme: 'village', squad: DEFAULT_SQUAD });
 const U = {
   sel: null as string | null,
-  mode: 'move' as 'move' | 'attack' | 'ability' | 'turret',
+  mode: 'move' as 'move' | 'attack' | 'ability' | 'extra',
   pending: null as Pending | null,
   plan: null as { path: { x: number; z: number }[]; end: { x: number; z: number } } | null,
   inspect: null as string | null,
@@ -46,6 +50,8 @@ const coach = new Coach($('coach'), $('coachText'), $('coachOk'), $('coachSkip')
 const sel = (): Unit | null => (U.sel ? unitById(s, U.sel) : null);
 const myTurn = () => s.phase === 'player' && !U.busy;
 const isOver = () => s.phase === 'over';
+const modeSlot = (): Slot => (U.mode === 'extra' ? 2 : 1);
+const inAbilityMode = () => U.mode === 'ability' || U.mode === 'extra';
 
 /* ---------- Saving ---------- */
 
@@ -147,23 +153,47 @@ async function enemyTurn(resume: boolean) {
 
 function checkEnd(): boolean {
   if (s.phase !== 'over') return false;
+  // Campaign results go to the Barracks first, before the finished battle's save is cleared
+  const report = s.mode === 'campaign' ? applyBattle(camp, s) : null;
+  if (report) saveCampaign();
   save();
   U.sel = null;
   renderAll();
   const won = s.winner === 'hero';
   play(won ? 'win' : 'lose');
   coach.finishBattle();
-  setTimeout(() => {
-    const left = living(s, 'hero').length;
-    $('endTitle').textContent = won ? 'Victory!' : 'Defeat';
-    const place = s.theme === 'forest' ? 'The Dark Forest' : 'The village';
-    $('endText').textContent = won
-      ? `${place} is safe. Your squad won in ${s.turn} ${s.turn === 1 ? 'turn' : 'turns'} with ${left} of 4 heroes standing.`
-      : `The goblins hold ${place.toLowerCase()} this time. Regroup and try again.`;
-    $('end').hidden = false;
-    $('againBtn').focus();
-  }, 900);
+  setTimeout(() => showEnd(won, report), 900);
   return true;
+}
+
+function showEnd(won: boolean, report: BattleReport | null) {
+  const left = living(s, 'hero').length;
+  const total = s.units.filter(u => u.team === 'hero' && !CLASSES[u.cls].structure).length;
+  $('endTitle').textContent = won ? 'Victory!' : 'Defeat';
+  const place = s.theme === 'forest' ? 'The Dark Forest' : 'The village';
+  $('endText').textContent = won
+    ? `${place} is safe. Your squad won in ${s.turn} ${s.turn === 1 ? 'turn' : 'turns'} with ${left} of ${total} heroes standing.`
+    : `The goblins hold ${place.toLowerCase()} this time. Regroup and try again.`;
+  const box = $('endReport');
+  box.innerHTML = '';
+  if (report) {
+    const lines: string[] = [`<div class="line"><span class="gold">+${report.gold} gold</span> · ${report.goblins} goblin${report.goblins === 1 ? '' : 's'} defeated</div>`];
+    for (const h of report.heroes) {
+      if (h.fell) { lines.push(`<div class="line fell"><b>${esc(h.name)}</b> fell in battle. They are on the Fallen Heroes wall.</div>`); continue; }
+      const up = h.levelAfter > h.levelBefore;
+      lines.push(`<div class="line${up ? ' up' : ''}"><b>${esc(h.name)}</b> +${h.xp} XP` +
+        (h.kills ? ` (${h.kills} defeated)` : '') +
+        (up ? ` · <strong>Level ${h.levelAfter}!</strong>${h.levelAfter === 2 ? ' +1 heart' : ''}` : '') +
+        (h.canPromote ? ' · <strong>Ready to promote</strong> in the Barracks' : '') + '</div>');
+    }
+    if (report.freeRecruits.length) lines.push(`<div class="line">${report.freeRecruits.map(esc).join(', ')} joined the Barracks for free, so you have a full squad.</div>`);
+    box.innerHTML = lines.join('');
+  } else if (s.mode !== 'campaign') {
+    box.innerHTML = '<div class="line">Practice battle: nobody was lost and no XP was earned.</div>';
+  }
+  $('againBtn').textContent = s.mode === 'campaign' ? 'Back to the Barracks' : 'Play again';
+  $('end').hidden = false;
+  $('againBtn').focus();
 }
 
 /* ---------- Player input ---------- */
@@ -224,11 +254,9 @@ async function confirmPending() {
       await animate(performMoveAttack(s, u, pathTo(p.node), unitById(s, p.target)!));
     } else if (p.kind === 'dig') {
       await animate(performDig(s, u, p.x, p.z));
-    } else if (p.kind === 'turret') {
-      await animate(performTurret(s, u, p.x, p.z));
     } else {
       U.flags.add('ability');
-      await animate(performAbility(s, u, p.x, p.z));
+      await animate(performAbility(s, u, p.x, p.z, p.slot));
     }
   });
   afterHeroAction();
@@ -244,19 +272,14 @@ function handleTap(x: number, z: number) {
   U.inspect = null;
   if (p && p.x === x && p.z === z) { confirmPending(); return; }
   if (U.plan && U.mode === 'move' && U.plan.end.x === x && U.plan.end.z === z) { walkPlan(); return; }
-  if (u && U.mode === 'ability' && abilityTargets(s, u).some(([ax, az]) => ax === x && az === z)) { setPendingAbility(x, z); return; }
-  if (u && U.mode === 'turret') {
-    if (turretTargets(s, u).some(([ax, az]) => ax === x && az === z)) { U.pending = { kind: 'turret', x, z }; play('click'); renderAll(); }
-    else { U.mode = 'move'; U.pending = null; renderAll(); }
-    return;
-  }
+  if (u && inAbilityMode() && abilityTargets(s, u, modeSlot()).some(([ax, az]) => ax === x && az === z)) { setPendingAbility(x, z); return; }
   if (visibleThere && visibleThere === u && U.mode === 'move' && U.plan) { U.plan = null; renderAll(); return; }
   if (visibleThere && visibleThere.team === 'hero' && !CLASSES[visibleThere.cls].structure) { play('click'); setSel(visibleThere.id); return; }
   if (!u) {
     if (visibleThere) { U.inspect = visibleThere.id; renderAll(); }
     return;
   }
-  if (U.mode === 'ability') { U.mode = 'move'; U.pending = null; renderAll(); return; }
+  if (inAbilityMode()) { U.mode = 'move'; U.pending = null; renderAll(); return; }
   if (visibleThere && visibleThere.team === 'gob' && U.plan && planShots(u).canHit.includes(visibleThere)) {
     U.mode = 'attack';
     U.inspect = visibleThere.id;
@@ -301,7 +324,7 @@ function handleTap(x: number, z: number) {
 view.onTap = handleTap;
 
 function setPendingAbility(x: number, z: number) {
-  U.pending = { kind: 'ability', x, z };
+  U.pending = { kind: 'ability', x, z, slot: modeSlot() };
   play('click');
   renderAll();
 }
@@ -355,24 +378,34 @@ function renderHighlights() {
     }
     if (pm) view.hl(pm.x, pm.z, COL.area, 0.85, pm.kind === 'dig' ? hAt(s, pm.x, pm.z) : 0);
   }
-  if (U.mode === 'turret') {
-    turretTargets(s, u).forEach(([x, z]) => view.hl(x, z, COL.ability, 0.5));
-    if (U.pending) view.hl(U.pending.x, U.pending.z, COL.area, 0.85);
-  }
-  if (U.mode === 'ability') {
-    const ab = abilityOf(u)!;
-    if (ab.key === 'spin') {
-      living(s, 'gob').filter(g => adjacent(u.x, u.z, g.x, g.z)).forEach(g => view.hl(g.x, g.z, COL.attack, 0.7));
-      view.hl(u.x, u.z, COL.ability, 0.6);
-    } else if (ab.key === 'heal') {
-      abilityTargets(s, u).forEach(([x, z]) => view.hl(x, z, COL.heal, 0.55));
-    } else {
-      abilityTargets(s, u).forEach(([x, z]) => view.hl(x, z, COL.ability, ab.key === 'build' ? 0.55 : 0.22, ab.key === 'build' ? hAt(s, x, z) : 0));
+  if (inAbilityMode()) {
+    const slot = modeSlot();
+    const ab = abilityOf(u, slot)!;
+    const cells = abilityTargets(s, u, slot);
+    const foesNear = () => s.units.filter(g => g.alive && g.team === 'gob' && canSee(s, 'hero', g) && near8(u.x, u.z, g.x, g.z));
+    switch (ab.key) {
+      case 'spin':
+        foesNear().forEach(g => view.hl(g.x, g.z, COL.attack, 0.7));
+        view.hl(u.x, u.z, COL.ability, 0.6);
+        break;
+      case 'heal': case 'layOnHands':
+        cells.forEach(([x, z]) => view.hl(x, z, COL.heal, 0.55));
+        break;
+      case 'aimedShot':
+        cells.forEach(([x, z]) => view.hl(x, z, COL.attack, 0.6));
+        break;
+      case 'volley': case 'fireball': case 'blizzard': case 'vines': case 'iceWall':
+        cells.forEach(([x, z]) => view.hl(x, z, COL.ability, 0.22));
+        break;
+      default:
+        cells.forEach(([x, z]) => view.hl(x, z, COL.ability, 0.55, ab.key === 'build' ? hAt(s, x, z) : 0));
     }
     const pm = U.pending;
-    if (pm) {
-      if (ab.key === 'build' || ab.key === 'heal') view.hl(pm.x, pm.z, COL.area, 0.85, ab.key === 'build' ? hAt(s, pm.x, pm.z) : 0);
-      else if (ab.key !== 'spin') area3(s, pm.x, pm.z).forEach(([x, z]) => view.hl(x, z, COL.area, 0.6, ab.key === 'fireball' ? hAt(s, x, z) : 0));
+    if (pm && pm.kind === 'ability') {
+      if (ab.key === 'build') buildCells(s, u, pm.x, pm.z).forEach(([x, z]) => view.hl(x, z, COL.area, 0.85, hAt(s, x, z)));
+      else if (ab.key === 'iceWall') iceWallCells(s, u, pm.x, pm.z).forEach(([x, z]) => view.hl(x, z, COL.area, 0.8, hAt(s, x, z)));
+      else if (['volley', 'fireball', 'blizzard', 'vines', 'tnt'].includes(ab.key)) area3(s, pm.x, pm.z).forEach(([x, z]) => view.hl(x, z, COL.area, ab.key === 'tnt' && (x !== pm.x || z !== pm.z) ? 0.35 : 0.6, ab.key === 'fireball' ? hAt(s, x, z) : 0));
+      else if (ab.key !== 'spin') view.hl(pm.x, pm.z, COL.area, 0.85);
     }
   }
 }
@@ -386,11 +419,15 @@ function previews(): Map<string, number> {
     out.set(p.target, p.kind === 'attack' ? hitInfo(s, u, t).dmg : hitInfo(s, u, t, p.node.x, p.node.z, true).dmg);
   }
   if (p.kind === 'ability') {
-    const ab = abilityOf(u)!;
-    if (ab.key === 'spin') living(s, 'gob').filter(g => adjacent(u.x, u.z, g.x, g.z)).forEach(g => out.set(g.id, ab.amount!));
-    if (ab.key === 'fireball' || ab.key === 'volley') {
+    const ab = abilityOf(u, p.slot)!;
+    if (ab.key === 'spin') living(s, 'gob').filter(g => near8(u.x, u.z, g.x, g.z)).forEach(g => out.set(g.id, ab.amount!));
+    if (ab.key === 'fireball' || ab.key === 'volley' || ab.key === 'blizzard' || ab.key === 'vines') {
       const cells = area3(s, p.x, p.z);
       living(s, 'gob').filter(g => canSee(s, 'hero', g) && cells.some(([x, z]) => x === g.x && z === g.z)).forEach(g => out.set(g.id, ab.amount!));
+    }
+    if (ab.key === 'aimedShot') {
+      const t = unitAt(s, p.x, p.z);
+      if (t) out.set(t.id, hitInfo(s, u, t, u.x, u.z, false, { bonus: ab.aimBonus, mult: ab.mult }).dmg);
     }
   }
   return out;
@@ -399,7 +436,7 @@ function previews(): Map<string, number> {
 const coverWord = (c: number) => (c === 2 ? 'Full cover' : c === 1 ? 'Half cover' : 'No cover');
 
 function hearts(u: Unit) {
-  return view.heartsHTML({ hp: u.hp, maxHp: u.maxHp, guard: u.guard, preview: 0 });
+  return view.heartsHTML({ hp: u.hp, maxHp: u.maxHp, guard: u.guard, preview: 0, status: '' }, 5);
 }
 
 function renderPanel() {
@@ -410,7 +447,7 @@ function renderPanel() {
     b.type = 'button';
     b.className = 'chip' + (u.id === U.sel ? ' sel' : '') + (u.alive ? '' : ' dead');
     b.disabled = !u.alive || s.phase !== 'player';
-    b.innerHTML = `<b>${esc(u.name)}</b><span class="cls">${CLASSES[u.cls].label}</span><span class="hearts">${hearts(u)}</span>` +
+    b.innerHTML = `<b>${esc(u.name)}</b><span class="cls">${classLabel(u)}${u.level && u.level > 1 ? ` <span class="lv">Lv${u.level}</span>` : ''}</span><span class="hearts">${hearts(u)}</span>` +
       `<span class="ap" aria-label="${u.ap} actions left"><i class="${u.ap > 0 ? 'on' : ''}"></i><i class="${u.ap > 1 ? 'on' : ''}"></i></span>`;
     b.addEventListener('click', () => { unlockAudio(); if (myTurn() && u.alive) { play('click'); setSel(u.id); } });
     roster.appendChild(b);
@@ -421,36 +458,64 @@ function renderPanel() {
   const atk = $<HTMLButtonElement>('btnAttack'), abl = $<HTMLButtonElement>('btnAbility'), conf = $<HTMLButtonElement>('btnConfirm'), guard = $<HTMLButtonElement>('btnGuard');
   $<HTMLButtonElement>('endTurn').disabled = !mine;
   $('turn').innerHTML = `Turn ${s.turn}<small>${s.phase === 'enemy' ? 'Goblins are moving' : s.phase === 'over' ? 'Battle over' : 'Your move'}</small>`;
+  const xb = $<HTMLButtonElement>('btnExtra');
   if (u && u.alive) {
     const C = def(u), ab = abilityOf(u)!;
-    atk.innerHTML = `${C.weapon}<small>${C.range === 1 ? 'Melee' : 'Range ' + C.range}</small>`;
-    const noTarget = ab.key === 'spin' ? 'No goblin next to them' : ab.key === 'heal' ? 'Nobody hurt' : 'No target';
-    abl.innerHTML = `${ab.name}<small>${u.cd > 0 ? 'Ready in ' + u.cd : abilityTargets(s, u).length === 0 ? noTarget : ab.cd === 0 ? '1 action' : 'Ready'}</small>`;
+    const r = rangeFrom(s, u, u.x, u.z);
+    atk.innerHTML = `${C.weapon}<small>${C.range === 1 ? 'Melee' : 'Range ' + r}</small>`;
+    abl.innerHTML = `${ab.short ?? ab.name}<small>${abilityStatus(u, 1)}</small>`;
     atk.disabled = !mine || u.ap <= 0 || (attackTargets(s, u).length === 0 && digTargets(s, u).length === 0 && moveAttackTargets(s, u).length === 0);
     guard.disabled = !mine || u.ap <= 0;
-    const tb = $<HTMLButtonElement>('btnTurret');
-    tb.hidden = u.cls !== 'builder';
-    const hasTurret = s.units.some(x => x.alive && x.owner === u.id);
-    tb.innerHTML = `Turret<small>${hasTurret ? 'Already up' : '1 action'}</small>`;
-    tb.disabled = !mine || turretTargets(s, u).length === 0;
-    tb.classList.toggle('on', U.mode === 'turret');
+    const ab2 = abilityOf(u, 2);
+    xb.hidden = !ab2;
+    $('actions').classList.toggle('five', !!ab2);
+    if (ab2) {
+      xb.innerHTML = `${ab2.short ?? ab2.name}<small>${abilityStatus(u, 2)}</small>`;
+      xb.disabled = !mine || !abilityReady(s, u, 2);
+    }
     abl.disabled = !mine || !abilityReady(s, u);
   } else {
     atk.innerHTML = 'Attack<small>&nbsp;</small>';
     abl.innerHTML = 'Ability<small>&nbsp;</small>';
     atk.disabled = abl.disabled = guard.disabled = true;
-    $('btnTurret').hidden = true;
+    xb.hidden = true;
+    $('actions').classList.remove('five');
   }
+  xb.classList.toggle('on', U.mode === 'extra');
   atk.classList.toggle('on', U.mode === 'attack');
   abl.classList.toggle('on', U.mode === 'ability');
   conf.disabled = !mine || (!U.pending && !U.plan);
   const p = U.pending;
-  conf.textContent = !p ? (U.plan ? 'Move!' : 'Confirm') : p.kind === 'attack' ? 'Attack!' : p.kind === 'moveattack' ? 'Go!' : p.kind === 'dig' ? 'Dig!' : p.kind === 'turret' ? 'Build!'
-    : u && abilityOf(u)!.key === 'build' ? 'Build!' : u && abilityOf(u)!.key === 'heal' ? 'Heal!' : 'Cast!';
+  conf.textContent = !p ? (U.plan ? 'Move!' : 'Confirm') : p.kind === 'attack' ? 'Attack!' : p.kind === 'moveattack' ? 'Go!' : p.kind === 'dig' ? 'Dig!'
+    : u ? confirmWord(abilityOf(u, p.slot)!) : 'Confirm';
   $('hint').innerHTML = hintText();
   const m = $('muteBtn');
   m.textContent = isMuted() ? '🔇' : '🔊';
   m.setAttribute('aria-label', isMuted() ? 'Sound off' : 'Sound on');
+}
+
+function abilityStatus(u: Unit, slot: Slot): string {
+  const ab = abilityOf(u, slot)!;
+  const cd = cdOf(u, slot);
+  if (cd > 0) return 'Ready in ' + cd;
+  const n = abilityTargets(s, u, slot).length;
+  if (!n) {
+    if (ab.max) return 'Already up';
+    if (ab.key === 'spin') return ab.wide ? 'No goblin around' : 'No goblin next to them';
+    if (ab.key === 'heal' || ab.key === 'layOnHands') return 'Nobody hurt';
+    return 'No target';
+  }
+  return ab.costsOneAction ? '1 action' : 'Ready';
+}
+
+function confirmWord(ab: AbilityDef): string {
+  switch (ab.key) {
+    case 'build': case 'turret': case 'tower': return 'Build!';
+    case 'tnt': case 'snare': return 'Place!';
+    case 'heal': case 'layOnHands': return 'Heal!';
+    case 'aimedShot': return 'Shoot!';
+    default: return 'Cast!';
+  }
 }
 
 function esc(t: string) {
@@ -481,34 +546,66 @@ function hintText(): string {
     return `${pre}<strong>${esc(t.name)}</strong> ${t.hp}♥ · <span class="pct">${i.chance}% to hit</span> · ${coverWord(i.cover)}` +
       `<br>Hit: -${i.dmg}, ${left(Math.max(0, t.hp - i.dmg))} · Miss: -${g2}, ${left(Math.max(0, t.hp - g2))} · Expected ${expected} damage`;
   }
-  if (p && p.kind === 'turret') return '<strong>Turret</strong> goes here. It shoots a goblin in range 5 at the end of each of your turns. Costs 1 action. Tap again or press Build!';
-  if (U.mode === 'turret') return 'Tap an orange tile to set up a crossbow Turret (up to 2 tiles away). It has 3♥ and shoots at the end of each of your turns.';
-  if (p && p.kind === 'dig') return '<strong>Dig</strong> out the top block here. Costs 1 action. Tap again or press Dig!';
-  if (p && p.kind === 'ability') {
-    const ab = abilityOf(u)!;
-    if (ab.key === 'build') return '<strong>Build</strong> a stone block here. Costs 1 action. Tap again or press Build!';
-    if (ab.key === 'heal') {
-      const f = unitAt(s, p.x, p.z)!;
-      return `<strong>Heal ${esc(f.name)}</strong>: ${f.hp}♥ → ${Math.min(f.maxHp, f.hp + (ab.amount ?? 2))}♥. Tap again or press Heal!`;
-    }
-    if (ab.key === 'spin') return `<strong>Spin Attack</strong> hits ${living(s, 'gob').filter(g => adjacent(u.x, u.z, g.x, g.z)).length} goblin(s) for ${ab.amount}. Press Cast!`;
-    const cells = area3(s, p.x, p.z);
-    const hitG = living(s, 'gob').filter(g => canSee(s, 'hero', g) && cells.some(([x, z]) => x === g.x && z === g.z));
-    const n = hitG.length, kills = hitG.filter(g => g.hp <= ab.amount!).length;
-    const blocks = cells.reduce((a, [x, z]) => a + (tileAt(s, x, z)!.blocks.includes('well') ? 0 : hAt(s, x, z)), 0);
-    return `<strong>${ab.name}</strong> here hits ${n} goblin${n === 1 ? '' : 's'}` +
-      (ab.key === 'fireball' ? ` and blows up ${blocks} block${blocks === 1 ? '' : 's'}. The ground catches fire` : '') + (kills ? `, defeating ${kills}` : '') + '. Tap again or press Cast!';
-  }
+  if (p && p.kind === 'dig') return '<strong>Dig</strong> out the top block here. Costs 1 action. Tap it again or press Dig!';
+  if (p && p.kind === 'ability') return abilityHint(u, abilityOf(u, p.slot)!, p.x, p.z) + ' <em>Tap it again or press ' + confirmWord(abilityOf(u, p.slot)!) + '</em>';
   if (U.plan) {
     const left = def(u).move - planSteps();
     const burns = U.plan.path.filter(n => tileAt(s, n.x, n.z)!.fire > 0).length;
     return `<strong>Route planned</strong>: ${planSteps()} of ${def(u).move} tiles. Tap the yellow end tile again (or Move!) to walk${left > 0 ? ', or tap a blue tile to add a stop.' : '.'} Tap ${esc(u.name)} to clear it.` +
       (burns ? ` <strong>Careful:</strong> this route walks through fire (-${burns}♥).` : '') + planShotText(u);
   }
-  if (U.mode === 'ability') return abilityOf(u)!.desc + (abilityOf(u)!.key === 'spin' ? ' Press Cast! to spin.' : ' Tap a highlighted tile.');
+  if (inAbilityMode()) { const ab = abilityOf(u, modeSlot())!; return ab.desc + (ab.key === 'spin' ? ' Press Cast! to spin.' : ' Tap a highlighted tile.'); }
   if (U.mode === 'attack') return 'Tap a goblin on a red tile to aim.' + (u.cls === 'builder' ? ' Tap a brown block to dig it out.' : '');
   if (u.ap <= 0) return `<strong>${esc(u.name)}</strong> ${u.guard ? 'is on Overwatch and will shoot the first goblin that moves into range.' : 'is done this turn.'} Pick another hero or end the turn.`;
   return `<strong>${esc(u.name)}</strong> has ${u.ap} ${u.ap === 1 ? 'action' : 'actions'}. Tap a blue tile to plan a route and see who you can hit from there, or a goblin on a red tile to attack.` + (def(u).range > 1 ? ' Grey goblins are in range but behind a tall wall.' : '');
+}
+
+function abilityHint(u: Unit, ab: AbilityDef, x: number, z: number): string {
+  const inArea = (cells: [number, number][], team: 'hero' | 'gob') =>
+    s.units.filter(o => o.alive && o.team === team && !CLASSES[o.cls].structure && (team === 'hero' || canSee(s, 'hero', o)) && cells.some(([cx, cz]) => cx === o.x && cz === o.z));
+  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : w.endsWith('o') ? 'es' : 's'}`;
+  switch (ab.key) {
+    case 'build': {
+      const n = buildCells(s, u, x, z).length;
+      return `<strong>Build</strong> ${n === 1 ? 'a tall wall' : n + ' tall walls'} here. Costs 1 action.`;
+    }
+    case 'turret': return '<strong>Turret</strong> goes here. It shoots a goblin in range 5 at the end of each of your turns, all by itself. Costs 1 action.';
+    case 'tower': return '<strong>Watchtower</strong> goes here. Its crossbow shoots by itself at the end of your turn, and a hero who climbs it gets +2 range and +15% to hit. Costs 1 action.';
+    case 'snare': return '<strong>Snare</strong>: hide a trap here. The first goblin to step on it takes ' + BALANCE.snare.damage + ' damage and stops. Costs 1 action.';
+    case 'tnt': {
+      const cells = area3(s, x, z);
+      const g = inArea(cells, 'gob').length, h = inArea(cells, 'hero').length;
+      return `<strong>TNT</strong> goes off after the goblins' turn: ${BALANCE.tnt.damage} damage to everyone around it. Right now that's ${plural(g, 'goblin')}` +
+        (h ? ` and <strong>${plural(h, 'hero')}</strong> (move them away!)` : '') + '. Costs 1 action.';
+    }
+    case 'heal': case 'layOnHands': {
+      const f = unitAt(s, x, z)!;
+      return `<strong>${ab.name}: ${esc(f.name)}</strong> ${f.hp}♥ → ${Math.min(f.maxHp, f.hp + (ab.amount ?? 2))}♥.` +
+        (ab.splash ? ` Friends next to them heal ${ab.splash}.` : '') + (ab.bless ? ' Their next attack gets +20% to hit.' : '') +
+        (ab.costsOneAction ? ' Costs 1 action.' : '');
+    }
+    case 'aimedShot': {
+      const t = unitAt(s, x, z)!;
+      const i = hitInfo(s, u, t, u.x, u.z, false, { bonus: ab.aimBonus, mult: ab.mult });
+      return `<strong>Aimed Shot at ${esc(t.name)}</strong> ${t.hp}♥ · <span class="pct">${i.chance}% to hit</span> · Hit: -${i.dmg}, miss: -${BALANCE.graze}.`;
+    }
+    case 'spin': {
+      const n = living(s, 'gob').filter(g => near8(u.x, u.z, g.x, g.z)).length;
+      return `<strong>${ab.name}</strong> hits ${plural(n, 'goblin')} for ${ab.amount}.`;
+    }
+    case 'iceWall': return `<strong>Ice Wall</strong>: ${plural(iceWallCells(s, u, x, z).length, 'tall ice block')} here, melting after ${ab.rounds ?? 3} turns.` + (ab.costsOneAction ? ' Costs 1 action.' : '');
+    case 'vines': {
+      const n = inArea(area3(s, x, z), 'gob').length;
+      return `<strong>Vines</strong> grab ${plural(n, 'goblin')}: ${ab.amount ?? 0} damage, and they can't move next turn.` + (ab.costsOneAction ? ' Costs 1 action.' : '');
+    }
+  }
+  const cells = area3(s, x, z);
+  const hitG = inArea(cells, 'gob');
+  const n = hitG.length, kills = hitG.filter(g => g.hp <= ab.amount!).length;
+  const blocks = cells.reduce((a, [cx, cz]) => a + (tileAt(s, cx, cz)!.blocks.includes('well') ? 0 : hAt(s, cx, cz)), 0);
+  return `<strong>${ab.name}</strong> here hits ${plural(n, 'goblin')}` +
+    (ab.key === 'fireball' ? ` and blows up ${plural(blocks, 'block')}. The ground catches fire` : '') +
+    (ab.key === 'blizzard' && n ? ' and freezes them' : '') + (kills ? `, defeating ${kills}` : '') + '.';
 }
 
 function planShotText(u: Unit): string {
@@ -549,25 +646,27 @@ $('btnAbility').addEventListener('click', () => {
   if (!myTurn() || !u) return;
   play('click');
   U.plan = null;
-  U.mode = U.mode === 'ability' ? 'move' : 'ability';
+  toggleAbility(u, 1);
+});
+function toggleAbility(u: Unit, slot: Slot) {
+  const m = slot === 2 ? 'extra' : 'ability';
+  U.mode = U.mode === m ? 'move' : m;
   U.pending = null;
-  const ab = abilityOf(u)!;
-  if (U.mode === 'ability' && ab.key === 'spin') U.pending = { kind: 'ability', x: u.x, z: u.z };
-  if (U.mode === 'ability' && ab.key === 'heal') {
-    const t = abilityTargets(s, u);
-    if (t.length === 1) U.pending = { kind: 'ability', x: t[0][0], z: t[0][1] };
+  const ab = abilityOf(u, slot)!;
+  if (U.mode === m) {
+    const t = abilityTargets(s, u, slot);
+    if (ab.key === 'spin') U.pending = { kind: 'ability', x: u.x, z: u.z, slot };
+    else if (['heal', 'layOnHands', 'aimedShot'].includes(ab.key) && t.length === 1) U.pending = { kind: 'ability', x: t[0][0], z: t[0][1], slot };
   }
   renderAll();
-});
+}
 $('btnConfirm').addEventListener('click', () => { unlockAudio(); confirmPending(); });
-$('btnTurret').addEventListener('click', () => {
+$('btnExtra').addEventListener('click', () => {
   const u = sel();
   if (!myTurn() || !u) return;
   play('click');
   U.plan = null;
-  U.mode = U.mode === 'turret' ? 'move' : 'turret';
-  U.pending = null;
-  renderAll();
+  toggleAbility(u, 2);
 });
 $('btnGuard').addEventListener('click', () => {
   const u = sel();
@@ -579,34 +678,237 @@ $('centerBtn').addEventListener('click', () => view.fitCamera());
 $('muteBtn').addEventListener('click', () => { unlockAudio(); setMuted(!isMuted()); play('click'); renderPanel(); });
 $('menuBtn').addEventListener('click', () => { if (U.busy) return; save(); showStart(); });
 
-/* ---------- Start, setup and end screens ---------- */
+/* ---------- Start, Barracks, setup and end screens ---------- */
 
 interface Setup { diff: Difficulty; theme: Theme | 'random' }
 function readJSON<T>(k: string, fallback: T): T {
   try { const v = localStorage.getItem(k); return v ? { ...fallback, ...JSON.parse(v) } : fallback; } catch { return fallback; }
 }
 const setup: Setup = readJSON<Setup>(SETUP_KEY, { diff: 'easy', theme: 'village' });
+// Practice squad: any class and path
 let squad: SquadMember[] = (() => {
   try {
     const v = JSON.parse(localStorage.getItem(SQUAD_KEY) || 'null');
-    if (Array.isArray(v) && v.length === 4 && v.every(m => HERO_CLASSES.includes(m.cls) && typeof m.name === 'string')) return v;
+    if (Array.isArray(v) && v.length === 4 && v.every(m => HERO_CLASSES.includes(m.cls) && typeof m.name === 'string')) {
+      return v.map(m => ({ cls: m.cls, name: m.name, path: m.path && PATHS[m.path as PathId]?.cls === m.cls ? m.path : undefined }));
+    }
   } catch { /* ignore */ }
   return DEFAULT_SQUAD.map(m => ({ ...m }));
 })();
+
+// The Barracks: made on first visit from the squad built before heroes were saved
+let camp: Campaign = (() => {
+  try { const c = parseCampaign(localStorage.getItem(CAMPAIGN_KEY)); if (c) return c; } catch { /* ignore */ }
+  return newCampaign(squad);
+})();
+function saveCampaign() {
+  try { localStorage.setItem(CAMPAIGN_KEY, JSON.stringify(camp)); } catch { /* ignore */ }
+}
+let setupMode: 'campaign' | 'practice' = 'campaign';
+
+const overlays = ['start', 'barracks', 'recruit', 'promote', 'fallen', 'setup', 'end'];
+function showOnly(id: string | null) {
+  for (const o of overlays) $(o).hidden = o !== id;
+}
 
 function showStart() {
   const saved = loadSave();
   $('continueBox').hidden = !saved;
   if (saved) {
     const n = living(saved, 'hero').length;
-    $('saveInfo').textContent = `Turn ${saved.turn} · ${cap(saved.diff)} · ${saved.theme === 'forest' ? 'Dark Forest' : 'Village'} · ${n} of 4 heroes standing`;
+    const total = saved.units.filter(u => u.team === 'hero' && !CLASSES[u.cls].structure).length;
+    $('saveInfo').textContent = `${saved.mode === 'campaign' ? 'Barracks battle' : 'Practice'} · Turn ${saved.turn} · ${cap(saved.diff)} · ${saved.theme === 'forest' ? 'Dark Forest' : 'Village'} · ${n} of ${total} heroes standing`;
   }
-  $('start').hidden = false;
-  $('setup').hidden = true;
-  $('end').hidden = true;
+  showOnly('start');
   (saved ? $('continueBtn') : $('newBtn')).focus();
 }
 const cap = (t: string) => t[0].toUpperCase() + t.slice(1);
+const heroHp = (h: HeroRecord) => heroMaxHp(h.cls, h.path, levelOf(h.xp));
+
+/* Barracks */
+
+let focusHero: string | null = null;
+function showBarracks() {
+  const added = ensureSquad(camp);
+  saveCampaign();
+  renderBarracks(added.length ? `${added.map(esc).join(', ')} joined for free, so you have a full squad.` : '');
+  showOnly('barracks');
+}
+
+function renderBarracks(note = '') {
+  $('gold').textContent = String(camp.gold);
+  $('record').textContent = camp.battles ? `${camp.wins} ${camp.wins === 1 ? 'win' : 'wins'} in ${camp.battles} ${camp.battles === 1 ? 'battle' : 'battles'}` : 'No battles yet';
+  $('pickLbl').textContent = `Pick ${PROGRESS.squadSize} heroes for the next battle (${camp.squad.length} of ${PROGRESS.squadSize})`;
+  const list = $('heroList');
+  list.innerHTML = '';
+  for (const h of camp.heroes) {
+    const lvl = levelOf(h.xp), need = nextLevelXp(h.xp), prev = PROGRESS.levelXp[lvl - 1];
+    const pct = need === null ? 100 : Math.round(((h.xp - prev) / (need - prev)) * 100);
+    const idx = camp.squad.indexOf(h.id);
+    const card = document.createElement('div');
+    card.className = 'heroCard' + (idx >= 0 ? ' picked' : '');
+    card.setAttribute('role', 'button');
+    card.tabIndex = 0;
+    card.setAttribute('aria-pressed', String(idx >= 0));
+    card.dataset.hero = h.id;
+    card.innerHTML = `<b>${esc(h.name)}</b><span class="cls">Level ${lvl} ${heroLabel(h)}</span>` +
+      `<span class="stats"><span class="f">♥</span>${heroHp(h)} · ${h.xp} XP${need === null ? '' : ' / ' + need} · ${h.kills} defeated</span>` +
+      `<div class="xp" aria-hidden="true"><i style="width:${pct}%"></i></div>` +
+      (canPromote(h) ? `<button class="promo" type="button" data-promote="${h.id}">⭐ Promote</button>` : '') +
+      (idx >= 0 ? `<span class="num">${idx + 1}</span>` : '');
+    list.appendChild(card);
+  }
+  const fh = focusHero ? camp.heroes.find(h => h.id === focusHero) : null;
+  $('heroInfo').innerHTML = note || (fh ? heroText(fh) : 'Tap a hero to add them to the squad or take them out. Heroes level up with XP and can be promoted at level 3.');
+  const rb = $<HTMLButtonElement>('recruitBtn');
+  rb.innerHTML = `Recruit<small>${camp.heroes.length >= PROGRESS.maxRoster ? 'Barracks full' : PROGRESS.recruitCost + ' gold'}</small>`;
+  rb.disabled = camp.heroes.length >= PROGRESS.maxRoster || camp.gold < PROGRESS.recruitCost;
+  const fb = $<HTMLButtonElement>('fallenBtn');
+  fb.innerHTML = `Fallen heroes<small>${camp.fallen.length || 'None yet'}</small>`;
+  fb.disabled = !camp.fallen.length;
+  $<HTMLButtonElement>('toBattleBtn').disabled = camp.squad.length !== Math.min(PROGRESS.squadSize, camp.heroes.length);
+}
+
+function heroText(h: HeroRecord): string {
+  const C = h.path ? { ...CLASSES[h.cls], ...PATHS[h.path].mod } : CLASSES[h.cls];
+  const blurb = h.path ? PATHS[h.path].blurb : CLASSES[h.cls].blurb;
+  const extra = C.extra ? ` <strong>${C.extra.name}</strong>: ${C.extra.desc}` : '';
+  return `<strong>${esc(h.name)}</strong>, ${heroLabel(h)}: ${blurb} <strong>${C.ability!.name}</strong>: ${C.ability!.desc}${extra}`;
+}
+
+$('heroList').addEventListener('click', e => {
+  const el = e.target as HTMLElement;
+  unlockAudio();
+  const pr = el.closest<HTMLElement>('[data-promote]');
+  if (pr) { play('click'); showPromote(pr.dataset.promote!); return; }
+  const card = el.closest<HTMLElement>('[data-hero]');
+  if (!card) return;
+  play('click');
+  focusHero = card.dataset.hero!;
+  toggleSquad(camp, focusHero);
+  saveCampaign();
+  renderBarracks();
+});
+$('heroList').addEventListener('keydown', e => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const card = (e.target as HTMLElement).closest<HTMLElement>('[data-hero]');
+  if (card && e.target === card) { e.preventDefault(); card.click(); }
+});
+$('barracksBack').addEventListener('click', () => showStart());
+$('toBattleBtn').addEventListener('click', () => { play('click'); showSetup('campaign'); });
+
+/* Recruit */
+
+let recruitCls: HeroClass = 'knight';
+function showRecruit() {
+  const have = new Set(camp.heroes.map(h => h.cls));
+  recruitCls = HERO_CLASSES.find(c => !have.has(c)) ?? 'knight';
+  $<HTMLInputElement>('recruitName').value = randomName(recruitCls, camp.heroes.map(h => h.name));
+  $('recruitText').textContent = `A new hero joins at level 1 for ${PROGRESS.recruitCost} gold. You have ${camp.gold}.`;
+  renderRecruit();
+  showOnly('recruit');
+}
+function renderRecruit() {
+  $('recruitClasses').innerHTML = HERO_CLASSES.map(c => `<button class="btn${c === recruitCls ? ' on' : ''}" type="button" data-cls="${c}" aria-pressed="${c === recruitCls}">${CLASSES[c].label}</button>`).join('');
+  const C = CLASSES[recruitCls];
+  $('recruitInfo').innerHTML = `<strong>${C.label}</strong>: ${C.blurb} ${C.hp}♥. Promotes at level 3 to ${PATHS[PATHS_OF[recruitCls][0]].label} or ${PATHS[PATHS_OF[recruitCls][1]].label}.`;
+}
+$('recruitBtn').addEventListener('click', () => { play('click'); showRecruit(); });
+$('recruitClasses').addEventListener('click', e => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-cls]');
+  if (!b) return;
+  play('click');
+  const inp = $<HTMLInputElement>('recruitName');
+  const auto = NAME_POOL[recruitCls].some(n => inp.value.startsWith(n));
+  recruitCls = b.dataset.cls as HeroClass;
+  if (auto || !inp.value.trim()) inp.value = randomName(recruitCls, camp.heroes.map(h => h.name));
+  renderRecruit();
+});
+$('recruitDice').addEventListener('click', () => { play('click'); $<HTMLInputElement>('recruitName').value = randomName(recruitCls, camp.heroes.map(h => h.name)); });
+$('recruitCancel').addEventListener('click', () => showBarracks());
+$('recruitOk').addEventListener('click', () => {
+  const r = recruit(camp, recruitCls, $<HTMLInputElement>('recruitName').value);
+  if (typeof r === 'string') { $('recruitText').textContent = r; return; }
+  play('build');
+  focusHero = r.id;
+  saveCampaign();
+  renderBarracks(`<strong>${esc(r.name)}</strong> the ${CLASSES[r.cls].label} joined the Barracks!`);
+  showOnly('barracks');
+});
+
+/* Promote */
+
+let promoting: { hero: string; path: PathId | null } | null = null;
+function showPromote(heroId: string) {
+  const h = camp.heroes.find(x => x.id === heroId);
+  if (!h) return;
+  promoting = { hero: heroId, path: null };
+  $('promoteTitle').textContent = `Promote ${h.name}`;
+  renderPromote();
+  showOnly('promote');
+}
+function renderPromote() {
+  if (!promoting) return;
+  const h = camp.heroes.find(x => x.id === promoting!.hero)!;
+  $('pathChoices').innerHTML = PATHS_OF[h.cls].map(p => {
+    const P = PATHS[p];
+    const C = { ...CLASSES[h.cls], ...P.mod };
+    const extra = C.extra ? `<br><strong>${C.extra.name}</strong>: ${C.extra.desc}` : '';
+    return `<button class="pathCard${promoting!.path === p ? ' on' : ''}" type="button" data-path="${p}" aria-pressed="${promoting!.path === p}">` +
+      `<b>${P.label}</b><span class="job">${P.job}</span><span class="what">${P.blurb}<br><strong>${C.ability!.name}</strong>: ${C.ability!.desc}${extra}</span></button>`;
+  }).join('');
+  $<HTMLButtonElement>('promoteOk').disabled = !promoting.path;
+  $('promoteOk').textContent = promoting.path ? `Become a ${PATHS[promoting.path].label}` : 'Promote';
+}
+$('pathChoices').addEventListener('click', e => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-path]');
+  if (!b || !promoting) return;
+  play('click');
+  promoting.path = b.dataset.path as PathId;
+  renderPromote();
+});
+$('promoteCancel').addEventListener('click', () => { promoting = null; showBarracks(); });
+$('promoteOk').addEventListener('click', () => {
+  if (!promoting?.path) return;
+  const h = camp.heroes.find(x => x.id === promoting!.hero)!;
+  if (promote(camp, h.id, promoting.path)) {
+    play('win');
+    saveCampaign();
+    focusHero = h.id;
+    renderBarracks(`<strong>${esc(h.name)}</strong> is now a <strong>${PATHS[promoting.path].label}</strong>! ` + heroText(h));
+  }
+  promoting = null;
+  showOnly('barracks');
+});
+
+/* Fallen heroes */
+
+$('fallenBtn').addEventListener('click', () => {
+  play('click');
+  $('fallenList').innerHTML = camp.fallen.slice().reverse().map(f =>
+    `<div class="stone"><b>${esc(f.name)}</b>, level ${f.level} ${heroLabel(f)}<br>Fell in ${f.place} in battle ${f.battle}, after ${f.battles} ${f.battles === 1 ? 'battle' : 'battles'} and ${f.kills} goblins defeated.</div>`).join('');
+  showOnly('fallen');
+});
+$('fallenBack').addEventListener('click', () => showBarracks());
+
+/* Battle setup (difficulty and map for both; the hero picker for practice only) */
+
+function showSetup(mode: 'campaign' | 'practice') {
+  setupMode = mode;
+  $('setupTitle').textContent = mode === 'campaign' ? 'Next battle' : 'Practice battle';
+  $('setupNote').textContent = mode === 'campaign'
+    ? 'Heroes who fall in this battle are gone for good. Survivors earn XP, and you earn gold either way.'
+    : 'Try any class and promotion. Nothing is lost and no XP is earned.';
+  $('slotBox').hidden = mode !== 'practice';
+  $('squadBox').hidden = mode !== 'campaign';
+  if (mode === 'campaign') {
+    $('squadSummary').innerHTML = squadMembers(camp).map(m => `<div><b>${esc(m.name)}</b><small>Level ${m.level} ${heroLabel(m)}</small></div>`).join('');
+  }
+  $('backBtn').textContent = mode === 'campaign' ? 'Barracks' : 'Back';
+  renderSetup();
+  if (mode === 'practice') classInfo(squad[0]);
+  showOnly('setup');
+}
 
 function renderSetup() {
   document.querySelectorAll<HTMLButtonElement>('[data-diff]').forEach(b => b.classList.toggle('on', b.dataset.diff === setup.diff));
@@ -617,7 +919,9 @@ function renderSetup() {
     const slot = document.createElement('div');
     slot.className = 'slot';
     const classes = HERO_CLASSES.map(c => `<button class="btn${m.cls === c ? ' on' : ''}" type="button" data-slot="${i}" data-cls="${c}" aria-pressed="${m.cls === c}">${CLASSES[c].label}</button>`).join('');
+    const paths = [undefined, ...PATHS_OF[m.cls]].map(p => `<button class="btn${m.path === p ? ' on' : ''}" type="button" data-slot="${i}" data-path="${p ?? ''}" aria-pressed="${m.path === p}">${p ? PATHS[p].label : 'Basic'}</button>`).join('');
     slot.innerHTML = `<div class="classes" role="group" aria-label="Hero ${i + 1} class">${classes}</div>` +
+      `<div class="paths3" role="group" aria-label="Hero ${i + 1} path">${paths}</div>` +
       `<div class="nameRow"><input type="text" maxlength="14" aria-label="Hero ${i + 1} name" value="${esc(m.name)}" data-name="${i}">` +
       `<button class="btn dice" type="button" data-dice="${i}" aria-label="Random name">🎲</button></div>`;
     box.appendChild(slot);
@@ -625,9 +929,12 @@ function renderSetup() {
   $<HTMLInputElement>('tipsToggle').checked = coach.enabled;
 }
 
-function classInfo(c: HeroClass) {
-  const C = CLASSES[c];
-  $('classInfo').innerHTML = `<strong>${C.label}</strong>: ${C.blurb} ${C.hp}♥, walks ${C.move}, ${C.range === 1 ? 'melee' : 'range ' + C.range}, ${C.dmg} damage. <strong>${C.ability!.name}</strong>: ${C.ability!.desc}`;
+function classInfo(m: { cls: HeroClass; path?: PathId }) {
+  const C = m.path ? { ...CLASSES[m.cls], ...PATHS[m.path].mod, label: PATHS[m.path].label } : CLASSES[m.cls];
+  const blurb = m.path ? PATHS[m.path].blurb : C.blurb;
+  const extra = C.extra ? ` <strong>${C.extra.name}</strong>: ${C.extra.desc}` : '';
+  $('classInfo').innerHTML = `<strong>${C.label}</strong>: ${blurb} ${C.hp}♥, walks ${C.move}, ${C.range === 1 ? 'melee' : 'range ' + C.range}, ${C.dmg} damage. <strong>${C.ability!.name}</strong>: ${C.ability!.desc}${extra}` +
+    (m.path ? ' Practice promoted heroes are level 3.' : '');
 }
 
 function randomName(c: HeroClass, avoid: string[]) {
@@ -647,7 +954,11 @@ $('slots').addEventListener('click', e => {
     // Swap to a fitting name when the old one came from the previous class's list
     const auto = NAME_POOL[m.cls].includes(m.name);
     squad[i] = { cls: c, name: auto ? randomName(c, squad.map(x => x.name)) : m.name };
-    classInfo(c);
+    classInfo(squad[i]);
+  } else if (b.dataset.path !== undefined) {
+    const i = Number(b.dataset.slot);
+    squad[i] = { ...squad[i], path: (b.dataset.path || undefined) as PathId | undefined };
+    classInfo(squad[i]);
   } else if (b.dataset.dice) {
     const i = Number(b.dataset.dice);
     squad[i] = { ...squad[i], name: randomName(squad[i].cls, squad.map(x => x.name)) };
@@ -661,14 +972,9 @@ $('slots').addEventListener('input', e => {
 document.querySelectorAll<HTMLButtonElement>('[data-diff]').forEach(b => b.addEventListener('click', () => { play('click'); setup.diff = b.dataset.diff as Difficulty; renderSetup(); }));
 document.querySelectorAll<HTMLButtonElement>('[data-theme]').forEach(b => b.addEventListener('click', () => { play('click'); setup.theme = b.dataset.theme as Theme | 'random'; renderSetup(); }));
 
-$('newBtn').addEventListener('click', () => {
-  unlockAudio();
-  $('start').hidden = true;
-  $('setup').hidden = false;
-  renderSetup();
-  classInfo(squad[0].cls);
-});
-$('backBtn').addEventListener('click', () => showStart());
+$('newBtn').addEventListener('click', () => { unlockAudio(); play('click'); showBarracks(); });
+$('practiceBtn').addEventListener('click', () => { unlockAudio(); play('click'); showSetup('practice'); });
+$('backBtn').addEventListener('click', () => (setupMode === 'campaign' ? showBarracks() : showStart()));
 $('continueBtn').addEventListener('click', () => {
   unlockAudio();
   const saved = loadSave();
@@ -677,25 +983,26 @@ $('continueBtn').addEventListener('click', () => {
 });
 $('startBtn').addEventListener('click', () => {
   unlockAudio();
-  squad = squad.map(m => ({ cls: m.cls, name: m.name.trim().slice(0, 14) || randomName(m.cls, []) }));
   const tipsOn = $<HTMLInputElement>('tipsToggle').checked;
   if (tipsOn !== coach.enabled) coach.reset(tipsOn);
-  try {
-    localStorage.setItem(SQUAD_KEY, JSON.stringify(squad));
-    localStorage.setItem(SETUP_KEY, JSON.stringify(setup));
-  } catch { /* ignore */ }
+  try { localStorage.setItem(SETUP_KEY, JSON.stringify(setup)); } catch { /* ignore */ }
   const theme: Theme = setup.theme === 'random' ? (Math.random() < 0.5 ? 'village' : 'forest') : setup.theme;
-  begin(createGame({ seed: (Math.random() * 2 ** 31) >>> 0, diff: setup.diff, theme, squad }));
+  const seed = (Math.random() * 2 ** 31) >>> 0;
+  if (setupMode === 'campaign') {
+    begin(createGame({ seed, diff: setup.diff, theme, squad: squadMembers(camp), mode: 'campaign' }));
+    return;
+  }
+  squad = squad.map(m => ({ cls: m.cls, name: m.name.trim().slice(0, 14) || randomName(m.cls, []), path: m.path }));
+  try { localStorage.setItem(SQUAD_KEY, JSON.stringify(squad)); } catch { /* ignore */ }
+  begin(createGame({ seed, diff: setup.diff, theme, squad: squad.map(m => ({ ...m, level: m.path ? 3 : 1 })), mode: 'practice' }));
 });
-$('againBtn').addEventListener('click', () => { $('end').hidden = true; showStart(); });
+$('againBtn').addEventListener('click', () => { if (s.mode === 'campaign') showBarracks(); else showStart(); });
 
 function begin(state: GameState) {
   s = state;
   U.flags = new Set();
   U.busy = false;
-  $('start').hidden = true;
-  $('setup').hidden = true;
-  $('end').hidden = true;
+  showOnly(null);
   view.load(s);
   save();
   if (s.phase === 'enemy') { enemyTurn(true); return; }

@@ -1,20 +1,20 @@
 // The CPU brain. It works for any unit on either team: the goblins use it in real games, and the
 // playtest simulator also uses it to play the heroes. It only reads the state and picks one action;
 // applyAction then runs that action through the normal rules.
-import { BALANCE } from './balance';
+import { BALANCE, CLASSES } from './balance';
 import { next } from './rng';
 import type { GameEvent, GameState, Unit } from './types';
 import {
-  abilityOf, abilityTargets, adjacent, area3, canAttackFrom, canSee, coverAt, def, dist, enemiesOf,
-  hitInfo, living, moveTiles, pathTo, performAbility, performAttack, performDig, performGuard, performMove,
-  performMoveAttack, performShamanHeal, performTurret, tileAt, turretTargets, unitAt, unitById, los, moveAttackTiles, type PathNode
+  abilityOf, abilityTargets, area3, areaDamage, canAttackFrom, canSee, cdOf, coverAt, def, dist, enemiesOf,
+  hitInfo, iceWallCells, los, living, moveTiles, near8, onTower, pathTo, performAbility, performAttack, performDig, performGuard, performMove,
+  performMoveAttack, performShamanHeal, rangeFrom, tileAt, unitAt, unitById, moveAttackTiles, type PathNode, type Slot
 } from './game';
 
 export type Action =
   | { k: 'move'; path: { x: number; z: number }[] }
   | { k: 'attack'; target: string }
   | { k: 'moveAttack'; path: { x: number; z: number }[]; target: string }
-  | { k: 'ability'; x: number; z: number }
+  | { k: 'ability'; x: number; z: number; slot?: Slot }
   | { k: 'shamanHeal'; target: string }
   | { k: 'dig'; x: number; z: number }
   | { k: 'turret'; x: number; z: number }
@@ -55,9 +55,16 @@ function sureValue(t: Unit, dmg: number): number {
   return Math.min(dmg, t.hp) * 8 + (dmg >= t.hp ? 14 : 0);
 }
 
+// Lit TNT next to (x, z): heroes keep clear (goblins don't know what TNT is)
+function nearTnt(s: GameState, x: number, z: number, u?: Unit): boolean {
+  if (u && u.team === 'gob') return false;
+  return s.units.some(t => t.alive && t.cls === 'tnt' && Math.max(Math.abs(t.x - x), Math.abs(t.z - z)) <= 1);
+}
+
 // How exposed a unit would be standing at (x, z): negative is dangerous
 function safety(s: GameState, u: Unit, x: number, z: number): number {
-  let v = 0;
+  let v = nearTnt(s, x, z, u) ? -12 : 0;
+  if (onTower(s, x, z)) v += 3;
   for (const e of enemiesOf(s, u)) {
     if (!canSee(s, u.team, e)) continue;
     const d = dist(x, z, e.x, e.z);
@@ -69,30 +76,127 @@ function safety(s: GameState, u: Unit, x: number, z: number): number {
   return v;
 }
 
-function abilityOptions(s: GameState, u: Unit): Scored[] {
-  const ab = abilityOf(u);
-  if (!ab || u.ap <= 0 || u.cd > 0) return [];
+function abilityOptions(s: GameState, u: Unit, slot: Slot = 1): Scored[] {
+  const ab = abilityOf(u, slot);
+  if (!ab || u.ap <= 0 || cdOf(u, slot) > 0) return [];
   const out: Scored[] = [];
-  const cells = abilityTargets(s, u);
+  const cells = abilityTargets(s, u, slot);
+  const act = (x: number, z: number): Action => ({ k: 'ability', x, z, slot });
   const foes = enemiesOf(s, u).filter(e => canSee(s, u.team, e));
   const friends = living(s, u.team);
   switch (ab.key) {
     case 'spin': {
-      const hit = foes.filter(g => adjacent(u.x, u.z, g.x, g.z));
+      const hit = foes.filter(g => near8(u.x, u.z, g.x, g.z) && !CLASSES[g.cls].structure);
       const v = hit.reduce((a, g) => a + sureValue(g, ab.amount!), 0);
-      if (hit.length) out.push({ a: { k: 'ability', x: u.x, z: u.z }, score: v + (hit.length >= 2 ? 4 : 0) });
+      if (hit.length) out.push({ a: act(u.x, u.z), score: v + (hit.length >= 2 ? 4 : 0) });
+      break;
+    }
+    case 'aimedShot':
+      for (const [x, z] of cells) {
+        const t = unitAt(s, x, z)!;
+        const info = hitInfo(s, u, t, u.x, u.z, false, { bonus: ab.aimBonus, mult: ab.mult });
+        out.push({ a: act(x, z), score: attackValue(t, info.chance, info.dmg) + 1 });
+      }
+      break;
+    case 'layOnHands':
+      for (const [x, z] of cells) {
+        const f = unitAt(s, x, z)!;
+        const missing = f.maxHp - f.hp;
+        if (missing < 2 && f.hp > 1) continue;
+        out.push({ a: act(x, z), score: Math.min(missing, ab.amount ?? 2) * 6 + (f.hp <= 2 ? 8 : 0) });
+      }
+      break;
+    case 'vines': {
+      for (const [x, z] of cells) {
+        const area = area3(s, x, z);
+        const hit = foes.filter(g => !CLASSES[g.cls].structure && !g.rooted && area.some(([cx, cz]) => cx === g.x && cz === g.z));
+        // Rooting melee goblins that are about to reach the squad is worth most
+        const v = hit.reduce((a, g) => a + (def(g).range === 1 ? 5 : 2) + (def(g).dmg >= 3 ? 3 : 0) + sureValue(g, ab.amount ?? 0), 0);
+        if (hit.length >= 2 || v >= 12) out.push({ a: act(x, z), score: v });
+      }
+      break;
+    }
+    case 'snare': {
+      // Put a trap on the way between the nearest goblin and the squad
+      if (!foes.length) break;
+      let best: Scored | null = null;
+      for (const [x, z] of cells) {
+        const near = Math.min(...foes.map(e => dist(x, z, e.x, e.z)));
+        if (near < 1.5 || near > 4.5) continue;
+        const score = 10 - near;
+        if (!best || score > best.score) best = { a: act(x, z), score };
+      }
+      if (best) out.push(best);
+      break;
+    }
+    case 'tnt': {
+      for (const [x, z] of cells) {
+        const area = area3(s, x, z);
+        const inA = (w: Unit) => area.some(([cx, cz]) => cx === w.x && cz === w.z);
+        const hit = foes.filter(g => inA(g) && !CLASSES[g.cls].structure);
+        if (!hit.length) continue;
+        // Goblins may walk away before it goes off, so count it at about half
+        const v = hit.reduce((a, g) => a + sureValue(g, areaDamage(s, g, BALANCE.tnt.damage)) * 0.5, 0) - living(s, u.team).filter(inA).length * 14;
+        if (v > 6) out.push({ a: act(x, z), score: v });
+      }
+      break;
+    }
+    case 'iceWall': {
+      // Wall off the goblin archers shooting at the squad
+      const shooters = foes.filter(g => def(g).range > 1);
+      if (!shooters.length) break;
+      const e = shooters.reduce((a, b) => (dist(u.x, u.z, a.x, a.z) <= dist(u.x, u.z, b.x, b.z) ? a : b));
+      let best: Scored | null = null;
+      for (const [x, z] of cells) {
+        const n = iceWallCells(s, u, x, z).length;
+        if (n < 2) continue;
+        const dE = dist(x, z, e.x, e.z);
+        if (dE < 1.5 || dE > 3.5) continue;
+        const score = 7 + n - Math.abs(dE - 2);
+        if (!best || score > best.score) best = { a: act(x, z), score };
+      }
+      if (best) out.push(best);
+      break;
+    }
+    case 'turret': {
+      let best: Scored | null = null;
+      for (const [x, z] of cells) {
+        const n = foes.filter(e => dist(x, z, e.x, e.z) <= CLASSES.turret.range + 0.01 && los(s, x, z, e.x, e.z)).length;
+        const near = foes.filter(e => dist(x, z, e.x, e.z) <= 8).length;
+        if (!n && !near) continue;
+        const score = 9 + n * 3 + (near ? 1 : 0);
+        if (!best || score > best.score) best = { a: act(x, z), score };
+      }
+      if (best) out.push(best);
+      break;
+    }
+    case 'tower': {
+      // Its crossbow shoots from up high, and a ranged friend can climb it
+      if (!foes.length) break;
+      const shooters = living(s, u.team).filter(f => f !== u && def(f).range > 1 && f.ap > 0);
+      let best: Scored | null = null;
+      for (const [x, z] of cells) {
+        const n = foes.filter(e => dist(x, z, e.x, e.z) <= CLASSES.turret.range + BALANCE.tower.range + 0.01).length;
+        const near = foes.filter(e => dist(x, z, e.x, e.z) <= 10).length;
+        if (!n && !near) continue;
+        const climb = shooters.some(f => dist(f.x, f.z, x, z) <= def(f).move) ? 2 : 0;
+        const score = 9 + n * 3 + (near ? 1 : 0) + climb;
+        if (!best || score > best.score) best = { a: act(x, z), score };
+      }
+      if (best) out.push(best);
       break;
     }
     case 'volley':
+    case 'blizzard':
     case 'fireball': {
       for (const [x, z] of cells) {
         const area = area3(s, x, z);
         const inA = (w: Unit) => area.some(([cx, cz]) => cx === w.x && cz === w.z);
         const hit = foes.filter(inA);
         if (!hit.length) continue;
-        let v = hit.reduce((a, g) => a + sureValue(g, ab.amount!), 0);
+        let v = hit.reduce((a, g) => a + sureValue(g, ab.amount!) + (ab.key === 'blizzard' ? 4 : 0), 0);
         if (ab.key === 'fireball') v -= friends.filter(inA).length * 12; // allies would stand in the fire
-        if (hit.length >= 2 || hit.some(g => g.hp <= ab.amount!)) out.push({ a: { k: 'ability', x, z }, score: v });
+        if (hit.length >= 2 || hit.some(g => g.hp <= ab.amount!)) out.push({ a: act(x, z), score: v });
       }
       break;
     }
@@ -101,7 +205,7 @@ function abilityOptions(s: GameState, u: Unit): Scored[] {
         const f = unitAt(s, x, z)!;
         const missing = f.maxHp - f.hp;
         if (missing < 2 && f.hp > 1) continue;
-        out.push({ a: { k: 'ability', x, z }, score: Math.min(missing, ab.amount ?? 2) * 7 + (f.hp <= 2 ? 10 : 0) });
+        out.push({ a: act(x, z), score: Math.min(missing, ab.amount ?? 2) * 7 + (f.hp <= 2 ? 10 : 0) + (ab.bless ? 2 : 0) });
       }
       break;
     }
@@ -110,7 +214,7 @@ function abilityOptions(s: GameState, u: Unit): Scored[] {
         // Put the new goblin on the side nearest the enemy
         const near = (c: [number, number]) => Math.min(99, ...foes.map(e => dist(c[0], c[1], e.x, e.z)));
         const best = cells.slice().sort((a, b) => near(a) - near(b))[0];
-        out.push({ a: { k: 'ability', x: best[0], z: best[1] }, score: 13 });
+        out.push({ a: act(best[0], best[1]), score: 13 });
       }
       break;
     case 'build':
@@ -131,6 +235,17 @@ function attackOptions(s: GameState, u: Unit): Scored[] {
   if (u.ap <= 0) return out;
   const foes = enemiesOf(s, u).filter(e => canSee(s, u.team, e));
   for (const t of foes) {
+    if (t.cls === 'tnt') {
+      // Hitting TNT sets it off right away: only worth it if the blast hurts the other side more
+      if (canAttackFrom(s, u, t, u.x, u.z)) {
+        const area = area3(s, t.x, t.z);
+        const inA = (w: Unit) => w !== t && area.some(([cx, cz]) => cx === w.x && cz === w.z);
+        const v = s.units.filter(w => w.alive && inA(w) && !CLASSES[w.cls].structure)
+          .reduce((a, w) => a + (w.team === u.team ? -1.5 : 1) * sureValue(w, areaDamage(s, w, BALANCE.tnt.damage)), 0);
+        if (v > 0) out.push({ a: { k: 'attack', target: t.id }, score: v * 0.7 });
+      }
+      continue;
+    }
     if (canAttackFrom(s, u, t, u.x, u.z)) {
       const info = hitInfo(s, u, t);
       out.push({ a: { k: 'attack', target: t.id }, score: attackValue(t, info.chance, info.dmg) + safety(s, u, u.x, u.z) * 0.5 });
@@ -164,13 +279,15 @@ function bestMove(s: GameState, u: Unit, tiles: Map<string, PathNode>, noise: nu
   const score = (x: number, z: number) => {
     let v = 0;
     if (tileAt(s, x, z)!.fire > 0) v -= 50;
+    if (nearTnt(s, x, z, u)) v -= 30;
     if (visible.length) {
       const nearest = Math.min(...visible.map(e => dist(x, z, e.x, e.z)));
       if (C.range === 1) v -= nearest * 3;
       else {
-        const want = Math.max(2, C.range - 1);
+        const want = Math.max(2, rangeFrom(s, u, x, z) - 1);
         v -= Math.abs(nearest - want) * 1.5;
         if (visible.some(e => canAttackFrom(s, u, e, x, z))) v += 5;
+        if (onTower(s, x, z)) v += 4;
       }
       v += safety(s, u, x, z) * (C.range === 1 ? 0.6 : 1.4);
     } else {
@@ -197,7 +314,7 @@ function bestMove(s: GameState, u: Unit, tiles: Map<string, PathNode>, noise: nu
 
 // A Builder with a spare action raises cover between itself and the nearest goblin
 function buildOption(s: GameState, u: Unit): Scored | null {
-  if (u.cls !== 'builder' || u.ap <= 0) return null;
+  if (abilityOf(u)?.key !== 'build' || u.ap <= 0) return null;
   const foes = enemiesOf(s, u).filter(e => canSee(s, u.team, e));
   if (!foes.length) return null;
   const e = foes.reduce((a, b) => (dist(u.x, u.z, a.x, a.z) <= dist(u.x, u.z, b.x, b.z) ? a : b));
@@ -208,22 +325,6 @@ function buildOption(s: GameState, u: Unit): Scored | null {
   return pick ? { a: { k: 'ability', x: pick[0], z: pick[1] }, score: 6 } : null;
 }
 
-// A Builder sets up a Turret where it can see the most goblins
-function turretOption(s: GameState, u: Unit): Scored | null {
-  const cells = turretTargets(s, u);
-  if (!cells.length) return null;
-  const foes = enemiesOf(s, u).filter(e => canSee(s, u.team, e));
-  let best: Scored | null = null;
-  for (const [x, z] of cells) {
-    const n = foes.filter(e => dist(x, z, e.x, e.z) <= 5.01 && los(s, x, z, e.x, e.z)).length;
-    const near = foes.filter(e => dist(x, z, e.x, e.z) <= 8).length;
-    if (!n && !near) continue;
-    const score = 9 + n * 3 + (near ? 1 : 0);
-    if (!best || score > best.score) best = { a: { k: 'turret', x, z }, score };
-  }
-  return best;
-}
-
 export function chooseAction(s: GameState, u: Unit, o?: AiOptions): Action {
   if (!u.alive || u.ap <= 0 || s.phase === 'over') return { k: 'end' };
   const noise = noiseOf(s, u, o);
@@ -231,8 +332,8 @@ export function chooseAction(s: GameState, u: Unit, o?: AiOptions): Action {
   const options: Scored[] = [
     ...attackOptions(s, u),
     ...abilityOptions(s, u),
-    ...shamanHealOptions(s, u),
-    ...[turretOption(s, u)].filter((x): x is Scored => !!x)
+    ...abilityOptions(s, u, 2),
+    ...shamanHealOptions(s, u)
   ].map(x => ({ ...x, score: x.score + jitter(s, noise) }));
   options.sort((a, b) => b.score - a.score);
   const top = options[0];
@@ -255,10 +356,10 @@ export function applyAction(s: GameState, u: Unit, a: Action): GameEvent[] {
     case 'move': return performMove(s, u, a.path);
     case 'attack': return performAttack(s, u, unitById(s, a.target)!);
     case 'moveAttack': return performMoveAttack(s, u, a.path, unitById(s, a.target)!);
-    case 'ability': return performAbility(s, u, a.x, a.z);
+    case 'ability': return performAbility(s, u, a.x, a.z, a.slot ?? 1);
     case 'shamanHeal': return performShamanHeal(s, u, unitById(s, a.target)!);
     case 'dig': return performDig(s, u, a.x, a.z);
-    case 'turret': return performTurret(s, u, a.x, a.z);
+    case 'turret': return performAbility(s, u, a.x, a.z, 2);
     case 'guard': return performGuard(s, u);
     case 'end': u.ap = 0; return [];
   }

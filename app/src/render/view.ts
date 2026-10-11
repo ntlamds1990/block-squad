@@ -14,7 +14,9 @@ export interface UnitView {
   id: string; team: 'hero' | 'gob'; cls: ClassId; name: string;
   group: THREE.Group; body: THREE.Group; mats: THREE.MeshLambertMaterial[]; label: HTMLDivElement;
   x: number; z: number; hp: number; maxHp: number; alive: boolean; guard: boolean; preview: number; hidden: boolean;
+  status: string; // small icons: frozen, rooted, blessed
 }
+const statusOf = (u: Unit) => (u.frozen ? '❄️' : '') + (u.rooted ? '🌿' : '') + (u.blessed ? '✨' : '');
 
 interface Tween { t: number; dur: number; fn: (k: number) => void; res: () => void }
 interface Particle { m: THREE.Mesh; v: THREE.Vector3; life: number; age: number }
@@ -28,6 +30,9 @@ const fogGeo = new THREE.PlaneGeometry(1, 1);
 const fireGeo = new THREE.BoxGeometry(0.22, 0.22, 0.22);
 const fireMats = [0xff8a3d, 0xffd23a, 0xff5a2a].map(c => new THREE.MeshBasicMaterial({ color: c }));
 const fogMat = new THREE.MeshBasicMaterial({ color: 0x050a08, transparent: true, opacity: 0.55, depthWrite: false });
+const iceMat = new THREE.MeshLambertMaterial({ map: MAT.ice.map, transparent: true, opacity: 0.82, emissive: new THREE.Color(0x3a6a8a), emissiveIntensity: 0.35 });
+const woodMat = new THREE.MeshLambertMaterial({ map: MAT.plank.map });
+const TOWER_Y = 1.05; // a hero on a Watchtower stands this high
 
 const ease = (t: number) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
 const key = (x: number, z: number) => x + ',' + z;
@@ -42,6 +47,8 @@ export class View {
   private world = new THREE.Group();
   private stacks: THREE.Mesh[][][] = [];
   private fires = new Map<string, FireFx>();
+  private towers = new Map<string, THREE.Group>();
+  private traps = new Map<string, THREE.Group>();
   private pickables: THREE.Object3D[] = [];
   private hlPool: THREE.Mesh[] = [];
   private hlUsed = 0;
@@ -107,6 +114,8 @@ export class View {
     this.floats = [];
     this.units.clear();
     this.fires.clear();
+    this.towers.clear();
+    this.traps.clear();
     this.tweens.forEach(t => t.res());
     this.tweens = [];
     const forest = s.theme === 'forest';
@@ -151,6 +160,8 @@ export class View {
     for (let z = 0; z < s.size; z++) for (let x = 0; x < s.size; x++) {
       for (const m of s.tiles[z][x].blocks) this.addBlock(x, z, m);
       if (s.tiles[z][x].fire > 0) this.setFire(x, z, true);
+      if (s.tiles[z][x].tower) this.setTower(x, z, true);
+      if (s.tiles[z][x].trap) this.setTrap(x, z, true);
     }
     for (const u of s.units) if (u.alive) this.addUnit(u);
     this.updateFog();
@@ -176,7 +187,7 @@ export class View {
     }
     const tex: Record<Exclude<Mat, 'well'>, THREE.Material> = {
       stone: MAT.stone, cobble: MAT.cobble, plank: MAT.plank, plank2: MAT.plank2, hay: MAT.hay, log: MAT.log,
-      leaves: MAT.leaves, roof: MAT.roof, bush: MAT.bush
+      leaves: MAT.leaves, roof: MAT.roof, bush: MAT.bush, ice: iceMat
     };
     const m = new THREE.Mesh(blockGeo, tex[mat]);
     if (mat === 'bush') m.scale.set(0.92, 0.85, 0.92);
@@ -209,6 +220,69 @@ export class View {
   }
 
   height(x: number, z: number) { return this.stacks[z]?.[x]?.length ?? 0; }
+  // Ground level for a unit: up on the platform of a Watchtower
+  baseY(x: number, z: number) { return this.towers.has(key(x, z)) ? TOWER_Y : 0; }
+
+  private setTower(x: number, z: number, on: boolean) {
+    const k = key(x, z);
+    const old = this.towers.get(k);
+    if (!on) {
+      if (old) {
+        this.world.remove(old);
+        this.towers.delete(k);
+        this.burst(new THREE.Vector3(x, 0.8, z), '#a2763f', 14, 0.14, 3);
+        this.units.forEach(v => { if (v.alive && v.x === x && v.z === z) v.group.position.y = 0; });
+      }
+      return;
+    }
+    if (old) return;
+    const g = new THREE.Group();
+    const post = new THREE.BoxGeometry(0.12, TOWER_Y, 0.12);
+    for (const [px, pz] of [[-0.38, -0.38], [0.38, -0.38], [-0.38, 0.38], [0.38, 0.38]]) {
+      const m = new THREE.Mesh(post, woodMat);
+      m.position.set(px, TOWER_Y / 2, pz);
+      m.castShadow = true;
+      g.add(m);
+    }
+    const deck = new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.1, 0.96), woodMat);
+    deck.position.y = TOWER_Y - 0.05;
+    deck.castShadow = deck.receiveShadow = true;
+    g.add(deck);
+    const rail = new THREE.BoxGeometry(0.96, 0.08, 0.06);
+    for (const dz of [-0.45, 0.45]) { const r = new THREE.Mesh(rail, woodMat); r.position.set(0, TOWER_Y + 0.3, dz); g.add(r); }
+    for (const dx of [-0.45, 0.45]) { const r = new THREE.Mesh(rail, woodMat); r.rotation.y = Math.PI / 2; r.position.set(dx, TOWER_Y + 0.3, 0); g.add(r); }
+    // A small crossbow on the rail
+    const bow = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.06, 0.08), new THREE.MeshLambertMaterial({ color: 0x5a3d22 }));
+    bow.position.set(0, TOWER_Y + 0.38, 0.45);
+    g.add(bow);
+    g.position.set(x, 0, z);
+    g.userData.tile = { x, z };
+    g.traverse(o => { o.userData.tile = { x, z }; });
+    this.world.add(g);
+    this.pickables.push(g);
+    this.towers.set(k, g);
+  }
+
+  private setTrap(x: number, z: number, on: boolean) {
+    const k = key(x, z);
+    const old = this.traps.get(k);
+    if (!on) { if (old) { this.world.remove(old); this.traps.delete(k); } return; }
+    if (old) return;
+    const g = new THREE.Group();
+    const mat = new THREE.MeshLambertMaterial({ color: 0x8a8a8a });
+    const ring = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.04, 0.6), new THREE.MeshLambertMaterial({ color: 0x5a3d22, transparent: true, opacity: 0.8 }));
+    ring.position.y = 0.02;
+    g.add(ring);
+    for (let i = 0; i < 6; i++) {
+      const t = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.16, 0.06), mat);
+      const a = (i / 6) * Math.PI * 2;
+      t.position.set(Math.cos(a) * 0.22, 0.1, Math.sin(a) * 0.22);
+      g.add(t);
+    }
+    g.position.set(x, 0, z);
+    this.world.add(g);
+    this.traps.set(k, g);
+  }
 
   private setFire(x: number, z: number, on: boolean) {
     const k = key(x, z);
@@ -235,7 +309,7 @@ export class View {
   private addUnit(u: Unit): UnitView {
     const small = u.cls === 'grunt' && u.maxHp <= BALANCE.shaman.summonHp;
     const m = buildModel(u.cls, u.team, small);
-    m.group.position.set(u.x, 0, u.z);
+    m.group.position.set(u.x, this.baseY(u.x, u.z), u.z);
     m.group.rotation.y = u.team === 'hero' ? Math.PI : 0;
     m.group.userData.unitId = u.id;
     this.world.add(m.group);
@@ -244,17 +318,18 @@ export class View {
     this.labels.appendChild(label);
     const v: UnitView = {
       id: u.id, team: u.team, cls: u.cls, name: u.name, ...m, label,
-      x: u.x, z: u.z, hp: u.hp, maxHp: u.maxHp, alive: true, guard: u.guard, preview: 0, hidden: false
+      x: u.x, z: u.z, hp: u.hp, maxHp: u.maxHp, alive: true, guard: u.guard, preview: 0, hidden: false, status: statusOf(u)
     };
     this.units.set(u.id, v);
     this.renderHearts(v);
     return v;
   }
 
-  heartsHTML(v: { hp: number; maxHp: number; guard: boolean; preview: number }) {
+  // `compactAbove`: show a number instead of a row of hearts when there are more than this many
+  heartsHTML(v: { hp: number; maxHp: number; guard: boolean; preview: number; status?: string }, compactAbove = 5) {
     const keep = Math.max(0, v.hp - v.preview);
-    let s = v.guard ? '<span class="ow" title="On overwatch">👁</span>' : '';
-    if (v.maxHp > 8) {
+    let s = (v.status ? `<span class="st">${v.status}</span>` : '') + (v.guard ? '<span class="ow" title="On overwatch">👁</span>' : '');
+    if (v.maxHp > compactAbove) {
       // Big health bars (like the Troll's) as a number so the label stays small
       return s + `<span class="f">♥</span>${keep}${v.preview ? `<span class="l">(-${Math.min(v.hp, v.preview)})</span>` : ''}<span class="e">/${v.maxHp}</span>`;
     }
@@ -379,7 +454,7 @@ export class View {
     this.floats.push({ el, pos: pos.clone(), age: 0, life: 1.1 });
   }
 
-  headPos(v: UnitView) { return new THREE.Vector3(v.group.position.x, 1.7, v.group.position.z); }
+  headPos(v: UnitView) { return new THREE.Vector3(v.group.position.x, 1.7 + v.group.position.y, v.group.position.z); }
 
   private face(v: UnitView, x: number, z: number) {
     if (x === v.x && z === v.z) return;
@@ -392,18 +467,20 @@ export class View {
     v.mats.forEach(m => m.emissive.copy(m.userData.e));
   }
 
-  private async projectile(from: THREE.Vector3, to: THREE.Vector3, kind: 'arrow' | 'bolt' | 'light' | 'hex' | 'fireball') {
+  private async projectile(from: THREE.Vector3, to: THREE.Vector3, kind: 'arrow' | 'bolt' | 'light' | 'hex' | 'fireball' | 'frost' | 'snow' | 'leaf' | 'tnt') {
     let m: THREE.Mesh;
     if (kind === 'arrow') m = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.5), new THREE.MeshLambertMaterial({ color: 0x8a5a2c }));
+    else if (kind === 'tnt') m = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.3), new THREE.MeshLambertMaterial({ color: 0xd33a2c }));
     else {
-      const sz = kind === 'fireball' ? 0.36 : 0.22;
-      const color = kind === 'light' ? 0xfff3b0 : kind === 'hex' ? 0xb48cff : 0xff8a3d;
+      const sz = kind === 'fireball' || kind === 'snow' ? 0.36 : 0.22;
+      const color = kind === 'light' ? 0xfff3b0 : kind === 'hex' ? 0xb48cff : kind === 'frost' || kind === 'snow' ? 0x9fdcff : kind === 'leaf' ? 0x5fbf3a : 0xff8a3d;
       m = new THREE.Mesh(new THREE.BoxGeometry(sz, sz, sz), new THREE.MeshBasicMaterial({ color }));
     }
     this.scene.add(m);
-    const arc = Math.min(2.5, from.distanceTo(to) * 0.18) + (kind === 'fireball' ? 1 : 0);
+    const big = kind === 'fireball' || kind === 'snow' || kind === 'tnt';
+    const arc = Math.min(2.5, from.distanceTo(to) * 0.18) + (big ? 1 : 0);
     const prev = from.clone();
-    await this.tween(kind === 'fireball' ? 0.5 : 0.32, k => {
+    await this.tween(big ? 0.5 : 0.32, k => {
       const p = from.clone().lerp(to, k);
       p.y += Math.sin(Math.PI * k) * arc;
       m.position.copy(p);
@@ -415,11 +492,12 @@ export class View {
   }
 
   private async lunge(v: UnitView, x: number, z: number) {
-    const sx = v.x, sz = v.z;
+    const sx = v.x, sz = v.z, y = v.group.position.y;
     const dx = (x - sx) * 0.35, dz = (z - sz) * 0.35;
-    await this.tween(0.12, k => { v.group.position.set(sx + dx * k, 0, sz + dz * k); });
-    await this.tween(0.14, k => { v.group.position.set(sx + dx * (1 - k), 0, sz + dz * (1 - k)); });
+    await this.tween(0.12, k => { v.group.position.set(sx + dx * k, y, sz + dz * k); });
+    await this.tween(0.14, k => { v.group.position.set(sx + dx * (1 - k), y, sz + dz * (1 - k)); });
   }
+  private from(v: UnitView, y = 0.9) { return new THREE.Vector3(v.x, v.group.position.y + y, v.z); }
 
   /* ---------- Playing events ---------- */
 
@@ -452,22 +530,30 @@ export class View {
         const fx = v.x, fz = v.z;
         this.face(v, e.x, e.z);
         const show = !(v.team === 'gob' && !this.sees(fx, fz) && !this.sees(e.x, e.z));
+        const y0 = this.baseY(fx, fz), y1 = this.baseY(e.x, e.z);
         if (show) {
           sfx('step');
           await this.tween(0.17, k => {
             v.group.position.x = fx + (e.x - fx) * k;
             v.group.position.z = fz + (e.z - fz) * k;
-            v.group.position.y = Math.sin(Math.PI * k) * 0.22;
+            v.group.position.y = y0 + (y1 - y0) * k + Math.sin(Math.PI * k) * 0.22;
           });
         }
         v.x = e.x; v.z = e.z;
-        v.group.position.set(e.x, 0, e.z);
+        v.group.position.set(e.x, y1, e.z);
         this.updateFog();
         return;
       }
       case 'attack': {
         const a = this.units.get(e.id), t = this.units.get(e.target);
-        if (!a || !t) return;
+        if (!t) return;
+        if (!a) {
+          // A Watchtower's crossbow
+          if (!e.from) return;
+          sfx('arrow');
+          await this.projectile(new THREE.Vector3(e.from[0], TOWER_Y + 0.5, e.from[1]), new THREE.Vector3(t.x, 0.8, t.z), 'arrow');
+          return;
+        }
         if (e.overwatch) {
           a.guard = false;
           this.renderHearts(a);
@@ -479,7 +565,7 @@ export class View {
         if (CLASSES[a.cls].range === 1) { sfx('swing'); await this.lunge(a, t.x, t.z); }
         else {
           sfx(e.kind === 'arrow' ? 'arrow' : e.kind === 'hex' ? 'hex' : 'bolt');
-          await this.projectile(new THREE.Vector3(a.x, 0.9, a.z), new THREE.Vector3(t.x, 0.8, t.z), e.kind === 'melee' ? 'arrow' : e.kind);
+          await this.projectile(this.from(a), this.from(t, 0.8), e.kind === 'melee' ? 'arrow' : e.kind);
         }
         return;
       }
@@ -496,6 +582,7 @@ export class View {
         const ox = v.group.position.x;
         await this.tween(0.18, k => { v.group.position.x = ox + Math.sin(k * Math.PI * 4) * 0.06 * (1 - k); });
         v.group.position.x = ox;
+        if (v.cls === 'tnt') v.hp = 0;
         return;
       }
       case 'death': {
@@ -506,7 +593,7 @@ export class View {
         sfx('death');
         const g = v.group;
         await this.tween(0.35, k => { g.rotation.x = (-Math.PI / 2) * ease(k); });
-        this.burst(new THREE.Vector3(g.position.x, 0.5, g.position.z), v.team === 'hero' ? '#9fb7e0' : '#76b041', 12, 0.14, 3);
+        this.burst(new THREE.Vector3(g.position.x, 0.5, g.position.z), v.cls === 'tnt' ? '#d33a2c' : v.team === 'hero' ? '#9fb7e0' : '#76b041', 12, 0.14, 3);
         await this.tween(0.3, k => { g.scale.setScalar(1 - k); });
         this.world.remove(g);
         this.updateFog();
@@ -519,7 +606,7 @@ export class View {
         this.renderHearts(v);
         if (!v.hidden) {
           this.floatText(this.headPos(v), '+' + e.amount + ' ♥', '#7cff8a');
-          this.burst(new THREE.Vector3(v.x, 0.8, v.z), e.cause === 'well' ? '#5a9ce8' : '#7cff8a', 8, 0.08, 2);
+          this.burst(new THREE.Vector3(v.x, 0.8 + v.group.position.y, v.z), e.cause === 'well' ? '#5a9ce8' : '#7cff8a', 8, 0.08, 2);
           sfx('heal');
           await this.wait(e.cause === 'well' ? 0.2 : 0.35);
         }
@@ -575,14 +662,45 @@ export class View {
             await this.lunge(v, e.x, e.z);
             break;
           case 'heal':
+          case 'layOnHands':
             if (e.x !== v.x || e.z !== v.z) {
-              await this.projectile(new THREE.Vector3(v.x, 1.1, v.z), new THREE.Vector3(e.x, 1.0, e.z), v.team === 'gob' ? 'hex' : 'light');
+              await this.projectile(this.from(v, 1.1), new THREE.Vector3(e.x, 1.0 + this.baseY(e.x, e.z), e.z), v.team === 'gob' ? 'hex' : 'light');
             }
             break;
           case 'turret':
+          case 'tower':
             await this.lunge(v, e.x, e.z);
             sfx('build');
-            this.burst(new THREE.Vector3(e.x, 0.5, e.z), '#9a9a9a', 10, 0.12, 3);
+            this.burst(new THREE.Vector3(e.x, 0.5, e.z), e.key === 'tower' ? '#a2763f' : '#9a9a9a', 10, 0.12, 3);
+            break;
+          case 'tnt':
+            sfx('swing');
+            await this.projectile(this.from(v, 1.0), new THREE.Vector3(e.x, 0.3, e.z), 'tnt');
+            break;
+          case 'snare':
+            sfx('dig');
+            await this.lunge(v, e.x, e.z);
+            this.burst(new THREE.Vector3(e.x, 0.2, e.z), '#6b4a2b', 8, 0.08, 2);
+            break;
+          case 'aimedShot':
+            this.floatText(this.headPos(v), 'Aimed Shot!', '#f2c14e');
+            await this.wait(0.35);
+            break;
+          case 'blizzard':
+            sfx('bolt');
+            await this.projectile(this.from(v, 1.1), new THREE.Vector3(e.x, 0.5, e.z), 'snow');
+            sfx('boom');
+            this.burst(new THREE.Vector3(e.x, 0.8, e.z), '#e8f6ff', 24, 0.14, 5);
+            this.burst(new THREE.Vector3(e.x, 0.8, e.z), '#9fdcff', 12, 0.12, 4);
+            break;
+          case 'iceWall':
+            sfx('bolt');
+            await this.projectile(this.from(v, 1.1), new THREE.Vector3(e.x, 0.5, e.z), 'frost');
+            break;
+          case 'vines':
+            sfx('summon');
+            await this.projectile(this.from(v, 1.1), new THREE.Vector3(e.x, 0.4, e.z), 'leaf');
+            this.burst(new THREE.Vector3(e.x, 0.4, e.z), '#5fbf3a', 18, 0.1, 3);
             break;
           case 'summon':
             sfx('summon');
@@ -605,7 +723,7 @@ export class View {
         const v = this.units.get(e.id);
         if (!v) return;
         play('guard');
-        this.floatText(new THREE.Vector3(v.group.position.x, 2.2, v.group.position.z), '+1 action!', '#7cff8a');
+        this.floatText(new THREE.Vector3(v.group.position.x, 2.2, v.group.position.z), 'Action back!', '#7cff8a');
         await this.wait(0.3);
         return;
       }
@@ -616,6 +734,46 @@ export class View {
         await this.wait(0.3);
         return;
       }
+      case 'status': {
+        const v = this.units.get(e.id);
+        if (!v) return;
+        const u = s.units.find(x => x.id === e.id);
+        v.status = u ? statusOf(u) : '';
+        this.renderHearts(v);
+        if (v.hidden) return;
+        const text = { frozen: ['Frozen!', '#9fdcff'], thaw: ['Frozen: skips a turn', '#9fdcff'], rooted: ['Rooted!', '#7cc35a'], blessed: ['Blessed!', '#fff3b0'] }[e.status];
+        this.floatText(new THREE.Vector3(v.group.position.x, 2.2 + v.group.position.y, v.group.position.z), text[0], text[1]);
+        if (e.status === 'frozen') this.burst(new THREE.Vector3(v.x, 0.8, v.z), '#bfe6fa', 10, 0.1, 2);
+        await this.wait(0.3);
+        return;
+      }
+      case 'explode': {
+        sfx('boom');
+        this.burst(new THREE.Vector3(e.x, 0.6, e.z), '#ff8a3d', 26, 0.2, 7);
+        this.burst(new THREE.Vector3(e.x, 0.6, e.z), '#ffd23a', 14, 0.14, 6);
+        this.burst(new THREE.Vector3(e.x, 0.6, e.z), '#4a4a4a', 12, 0.16, 5);
+        this.shake = reduceMotion ? 0 : 0.45;
+        this.floatText(new THREE.Vector3(e.x, 1.6, e.z), 'BOOM!', '#ff8a3d');
+        await this.wait(0.3);
+        return;
+      }
+      case 'tower':
+        this.setTower(e.x, e.z, e.on);
+        if (e.on) {
+          sfx('build');
+          const g = this.towers.get(key(e.x, e.z))!;
+          await this.tween(0.25, k => { g.scale.set(1, Math.max(0.01, k), 1); });
+          g.scale.set(1, 1, 1);
+        } else sfx('smash');
+        return;
+      case 'trap':
+        this.setTrap(e.x, e.z, e.on);
+        if (e.sprung) {
+          sfx('smash');
+          this.floatText(new THREE.Vector3(e.x, 1.8, e.z), 'Snap!', '#c9a26b');
+          await this.wait(0.2);
+        }
+        return;
       case 'guard': {
         const v = this.units.get(e.id);
         if (!v) return;
@@ -639,6 +797,8 @@ export class View {
         want.forEach(m => this.addBlock(x, z, m));
       }
       this.setFire(x, z, s.tiles[z][x].fire > 0);
+      this.setTower(x, z, !!s.tiles[z][x].tower);
+      this.setTrap(x, z, !!s.tiles[z][x].trap);
     }
     for (const u of s.units) {
       let v = this.units.get(u.id);
@@ -646,8 +806,8 @@ export class View {
       if (!v) continue;
       if (!u.alive && v.alive) { v.alive = false; v.label.remove(); this.world.remove(v.group); }
       if (!u.alive) continue;
-      v.x = u.x; v.z = u.z; v.hp = u.hp; v.maxHp = u.maxHp; v.guard = u.guard;
-      v.group.position.set(u.x, 0, u.z);
+      v.x = u.x; v.z = u.z; v.hp = u.hp; v.maxHp = u.maxHp; v.guard = u.guard; v.status = statusOf(u);
+      v.group.position.set(u.x, this.baseY(u.x, u.z), u.z);
       v.group.rotation.x = 0;
       v.group.scale.setScalar(1);
       this.renderHearts(v);
@@ -771,7 +931,7 @@ export class View {
     const sel = this.selected ? this.units.get(this.selected) : null;
     this.selRing.visible = !!(sel && sel.alive);
     if (sel && sel.alive) {
-      this.selRing.position.set(sel.group.position.x, 0.04, sel.group.position.z);
+      this.selRing.position.set(sel.group.position.x, sel.group.position.y + 0.04, sel.group.position.z);
       this.selRing.scale.setScalar(1 + Math.sin(t * 5) * 0.06);
     }
     this.units.forEach(v => { if (v.alive) v.body.position.y = Math.abs(Math.sin(t * 2.2 + v.x * 1.3 + v.z)) * 0.03; });
@@ -790,7 +950,7 @@ export class View {
     const w = this.app.clientWidth, h = this.app.clientHeight;
     this.units.forEach(v => {
       if (!v.alive) return;
-      this.tmp.set(v.group.position.x, 1.75, v.group.position.z).project(this.camera);
+      this.tmp.set(v.group.position.x, 1.75 + v.group.position.y, v.group.position.z).project(this.camera);
       const vis = this.tmp.z < 1 && !v.hidden;
       v.label.style.display = vis ? '' : 'none';
       v.label.style.left = ((this.tmp.x + 1) / 2) * w + 'px';

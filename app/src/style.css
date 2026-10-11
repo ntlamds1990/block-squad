@@ -250,3 +250,59 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 }
 .overlay { grid-template-columns: minmax(0, 1fr); place-items: start stretch; }
 .overlay > .card { margin: auto; }
+
+/* ---------- Heroes that grow: Barracks, recruits, promotions, fallen heroes ---------- */
+.card .btn small { display: block; font-size: 11px; font-weight: 700; opacity: 0.75; }
+.muted { color: var(--muted); font-size: 14px; }
+.purse { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-weight: 800; }
+.purse #gold { font-family: var(--display); font-size: 24px; color: var(--gold); }
+.purse #gold::before { content: '🪙 '; }
+.purse #record { font-size: 13px; color: var(--muted); }
+.heroes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.heroCard {
+  position: relative; text-align: left; background: var(--chip); border: 2px solid transparent; border-radius: 12px;
+  padding: 8px 10px; display: grid; gap: 2px; min-width: 0; box-sizing: border-box;
+}
+.heroCard.picked { border-color: var(--gold); background: #2a2f52; }
+.heroCard b { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 22px; }
+.heroCard .cls { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.heroCard .stats { font-size: 12px; color: var(--muted); }
+.heroCard .stats .f { color: var(--heart); }
+.heroCard .num {
+  position: absolute; top: 6px; right: 8px; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--gold); color: #2a1d05; font-weight: 800; font-size: 12px; display: grid; place-items: center;
+}
+.xp { height: 6px; border-radius: 3px; background: #3a4470; overflow: hidden; margin-top: 3px; }
+.xp i { display: block; height: 100%; background: var(--leaf); }
+.heroCard .promo {
+  margin-top: 4px; min-height: 34px; padding: 4px 8px; font-size: 12px; background: var(--gold); color: #2a1d05;
+  border-radius: 8px; font-weight: 800; box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.25);
+}
+.seg.five { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.seg.five .btn { font-size: 12px; padding: 6px 2px; }
+.paths { display: grid; gap: 8px; }
+.pathCard { text-align: left; background: var(--chip); border: 2px solid transparent; border-radius: 12px; padding: 10px 12px; display: grid; gap: 4px; }
+.pathCard.on { border-color: var(--gold); background: #2a2f52; }
+.pathCard b { font-family: var(--display); font-size: 22px; color: var(--gold); }
+.pathCard .job { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 800; }
+.pathCard .what { font-size: 13px; line-height: 1.4; }
+.wall { display: grid; gap: 6px; }
+.wall .stone { background: #2a2f45; border-left: 4px solid #8d8d8d; border-radius: 8px; padding: 8px 10px; font-size: 13px; line-height: 1.4; color: var(--muted); }
+.wall .stone b { color: var(--ink); font-size: 14px; }
+.squadSummary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; font-size: 13px; }
+.squadSummary div { background: var(--chip); border-radius: 8px; padding: 6px 8px; }
+.squadSummary small { display: block; color: var(--muted); font-size: 11px; }
+.report { display: grid; gap: 6px; font-size: 14px; }
+.report .line { background: var(--chip); border-radius: 8px; padding: 6px 10px; line-height: 1.35; }
+.report .line.fell { opacity: 0.75; border-left: 4px solid var(--gob); }
+.report .line.up { border-left: 4px solid var(--leaf); }
+.report .gold { font-weight: 800; color: var(--gold); }
+.slot .paths3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.slot .paths3 .btn { min-height: 32px; padding: 4px 2px; font-size: 11px; background: #232b4d; }
+.slot .paths3 .btn.on { background: #4a3a10; outline: 2px solid var(--gold); outline-offset: -2px; }
+.chip .lv { color: var(--gold); font-weight: 800; white-space: nowrap; }
+.chip .cls { letter-spacing: 0; hyphens: auto; overflow-wrap: anywhere; }
+#actions.five { gap: 4px; }
+#actions.five .btn { font-size: 12px; padding: 8px 2px; letter-spacing: -0.02em; }
+.hp .st { margin-right: 2px; }
+@media (max-width: 380px) { .heroes, .squadSummary { grid-template-columns: minmax(0, 1fr); } }

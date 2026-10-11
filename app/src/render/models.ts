@@ -132,6 +132,13 @@ export function buildModel(cls: ClassId, team: 'hero' | 'gob', small = false): M
       part(0.04, 0.04, 0.5, '#e9e2d2', 0, 0.98, 0.15);
       part(0.08, 0.08, 0.08, '#4c9bff', 0, 1.0, -0.28, { glow: true });
       break;
+    case 'tnt':
+      part(0.72, 0.72, 0.72, '#d33a2c', 0, 0.36, 0);
+      part(0.74, 0.2, 0.74, '#f4f0e6', 0, 0.4, 0);
+      part(0.46, 0.1, 0.02, '#1a1a1a', 0, 0.4, 0.375);
+      part(0.06, 0.2, 0.06, '#8a8a8a', 0, 0.82, 0);
+      part(0.1, 0.1, 0.1, '#ffd23a', 0, 0.96, 0, { glow: true });
+      break;
     case 'troll':
       part(0.26, 0.5, 0.3, '#5d6b4a', -0.17, 0.25, 0);
       part(0.26, 0.5, 0.3, '#5d6b4a', 0.17, 0.25, 0);

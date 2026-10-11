@@ -24,7 +24,8 @@ const PAL: Record<string, string[]> = {
   leaves: ['#3f8f2f', '#357d27', '#4a9e38', '#2e6e22'],
   bush: ['#2f6e2a', '#3a7d31', '#285f24', '#448a39'],
   roof: ['#b5462f', '#a23d29', '#c4553b'],
-  water: ['#3d7fd1', '#4a8fe0', '#3572c2', '#5a9ce8']
+  water: ['#3d7fd1', '#4a8fe0', '#3572c2', '#5a9ce8'],
+  ice: ['#bfe6fa', '#a9dcf7', '#d4effc', '#9fd3f2']
 };
 
 type G = CanvasRenderingContext2D;
@@ -83,6 +84,7 @@ export const TEX = {
     g.fillStyle = '#d14a5a'; for (let i = 0; i < 5; i++) g.fillRect(Math.floor(R() * 15), Math.floor(R() * 15), 1, 1);
   }),
   roof: makeTex(g => { for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) { g.fillStyle = y % 4 === 3 ? '#7e2c1c' : pick(PAL.roof); g.fillRect(x, y, 1, 1); } }),
+  ice: makeTex(g => { fill(g, PAL.ice); g.fillStyle = '#ffffff'; for (let i = 0; i < 5; i++) g.fillRect(Math.floor(R() * 12), Math.floor(R() * 14), 3, 1); g.fillStyle = '#7fc0e8'; g.fillRect(0, 15, 16, 1); g.fillRect(15, 0, 1, 16); }),
   water: makeTex(g => { fill(g, PAL.water); g.fillStyle = '#9cc8f5'; for (let i = 0; i < 6; i++) g.fillRect(Math.floor(R() * 14), Math.floor(R() * 16), 2, 1); })
 };
 
@@ -93,5 +95,5 @@ export const MAT = Object.fromEntries(
 
 export const BLOCK_COLOR: Record<string, string> = {
   stone: '#8d8d8d', cobble: '#808080', plank: '#a2763f', plank2: '#c4975b', hay: '#e2c048', log: '#6b4a2b',
-  leaves: '#3f8f2f', roof: '#b5462f', bush: '#2f6e2a', well: '#8d8d8d'
+  leaves: '#3f8f2f', roof: '#b5462f', bush: '#2f6e2a', well: '#8d8d8d', ice: '#bfe6fa'
 };

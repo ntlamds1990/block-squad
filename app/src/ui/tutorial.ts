@@ -1,7 +1,6 @@
 // Learn-as-you-play tips for the first battle. Each tip pops up the first time its moment comes
 // (a goblin in reach, a hero hurt, a fire starting) and never again once dismissed.
-import { CLASSES } from '../rules/balance';
-import { abilityTargets, attackTargets, canSee, living, moveAttackTargets } from '../rules/game';
+import { abilityOf, abilityTargets, attackTargets, canSee, living, moveAttackTargets } from '../rules/game';
 import type { GameState, Unit } from '../rules/types';
 
 const TIPS_KEY = 'blockSquad.tips';
@@ -34,7 +33,7 @@ const TIPS: Tip[] = [
     id: 'move',
     when: c => c.s.phase === 'player' && !!c.sel,
     doneWhen: c => c.flags.has('moved'),
-    text: c => `<strong>${heroName(c)}</strong> is ready (yellow ring). Blue tiles show where they can walk. <strong>Tap a blue tile</strong> to plan a route, then tap it again to walk.`
+    text: c => `<strong>${heroName(c)}</strong> is ready (yellow ring). Blue tiles show where they can walk. <strong>Tap a blue tile</strong> to plan a route, then tap the same tile again to walk. Tapping twice works for attacks and abilities too.`
   },
   {
     id: 'actions',
@@ -79,11 +78,11 @@ const TIPS: Tip[] = [
   },
   {
     id: 'ability',
-    when: c => c.s.phase === 'player' && c.s.turn >= 2 && living(c.s, 'hero').some(h => h.cd <= 0 && h.ap > 0 && CLASSES[h.cls].ability?.key !== 'build' && abilityTargets(c.s, h).length > 0),
+    when: c => c.s.phase === 'player' && c.s.turn >= 2 && living(c.s, 'hero').some(h => h.cd <= 0 && h.ap > 0 && abilityOf(h)?.key !== 'build' && abilityTargets(c.s, h).length > 0),
     doneWhen: c => c.flags.has('ability'),
     text: c => {
-      const h = living(c.s, 'hero').find(h => h.cd <= 0 && CLASSES[h.cls].ability?.key !== 'build' && abilityTargets(c.s, h).length > 0)!;
-      return `<strong>${h.name}'s ${CLASSES[h.cls].ability!.name}</strong> is ready. Select ${h.name} and press the ability button to see what it does.`;
+      const h = living(c.s, 'hero').find(h => h.cd <= 0 && abilityOf(h)?.key !== 'build' && abilityTargets(c.s, h).length > 0)!;
+      return `<strong>${h.name}'s ${abilityOf(h)!.name}</strong> is ready. Select ${h.name} and press the ability button to see what it does.`;
     }
   },
   {

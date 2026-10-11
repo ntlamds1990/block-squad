@@ -39,7 +39,7 @@
       <div id="actions">
         <button class="btn" id="btnAttack" type="button">Attack</button>
         <button class="btn" id="btnAbility" type="button">Ability</button>
-        <button class="btn" id="btnTurret" type="button" hidden>Turret</button>
+        <button class="btn" id="btnExtra" type="button" hidden>Turret</button>
         <button class="btn" id="btnGuard" type="button">Overwatch<small>Ends turn</small></button>
         <button class="btn go" id="btnConfirm" type="button" disabled>Confirm</button>
       </div>
@@ -51,18 +51,75 @@
     <div class="card">
       <div class="eyebrow">Fantasy squad tactics</div>
       <h1>Block Squad</h1>
-      <p>Goblins are raiding the realm. Build a squad of four heroes and drive them out.</p>
+      <p>Goblins are raiding the realm. Lead your heroes into battle, level them up and promote them. Heroes who fall are gone for good.</p>
       <div class="stack" id="continueBox" hidden>
         <button class="btn primary" id="continueBtn" type="button">Continue battle</button>
         <div class="saveInfo" id="saveInfo"></div>
       </div>
-      <button class="btn" id="newBtn" type="button">New battle</button>
+      <button class="btn" id="newBtn" type="button">Barracks<small>Your heroes, recruits and the next battle</small></button>
+      <button class="btn" id="practiceBtn" type="button">Practice battle<small>Any heroes and paths, nothing to lose</small></button>
+    </div>
+  </div>
+
+  <div class="overlay" id="barracks" hidden>
+    <div class="card wide">
+      <h2>Barracks</h2>
+      <div class="purse"><span id="gold">0</span><span id="record"></span></div>
+      <div class="stack">
+        <label class="lbl" id="pickLbl">Pick 4 heroes for the next battle</label>
+        <div class="heroes" id="heroList"></div>
+        <div class="classInfo" id="heroInfo"></div>
+      </div>
+      <div class="row2">
+        <button class="btn" id="recruitBtn" type="button">Recruit<small>25 gold</small></button>
+        <button class="btn" id="fallenBtn" type="button">Fallen heroes<small>&nbsp;</small></button>
+      </div>
+      <div class="row2">
+        <button class="btn" id="barracksBack" type="button">Back</button>
+        <button class="btn primary" id="toBattleBtn" type="button">Choose battle</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="recruit" hidden>
+    <div class="card wide">
+      <h2>Recruit</h2>
+      <p class="muted" id="recruitText">A new hero joins at level 1.</p>
+      <div class="seg five" id="recruitClasses" role="group" aria-label="Class"></div>
+      <div class="classInfo" id="recruitInfo"></div>
+      <div class="slot"><div class="nameRow"><input type="text" maxlength="14" aria-label="Name" id="recruitName"><button class="btn dice" type="button" id="recruitDice" aria-label="Random name">🎲</button></div></div>
+      <div class="row2">
+        <button class="btn" id="recruitCancel" type="button">Cancel</button>
+        <button class="btn primary" id="recruitOk" type="button">Recruit</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="promote" hidden>
+    <div class="card wide">
+      <h2 id="promoteTitle">Promote</h2>
+      <p id="promoteText">Choose a path. It's for good, so pick the one that fits your squad.</p>
+      <div class="paths" id="pathChoices"></div>
+      <div class="row2">
+        <button class="btn" id="promoteCancel" type="button">Later</button>
+        <button class="btn primary" id="promoteOk" type="button" disabled>Promote</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="fallen" hidden>
+    <div class="card wide">
+      <h2>Fallen heroes</h2>
+      <p class="muted">They fought bravely and will be remembered.</p>
+      <div class="wall" id="fallenList"></div>
+      <button class="btn" id="fallenBack" type="button">Back</button>
     </div>
   </div>
 
   <div class="overlay" id="setup" hidden>
     <div class="card wide">
-      <h2>Your squad</h2>
+      <h2 id="setupTitle">Your squad</h2>
+      <p class="muted" id="setupNote"></p>
       <div class="stack">
         <label class="lbl">Difficulty</label>
         <div class="seg" role="group" aria-label="Difficulty">
@@ -79,10 +136,14 @@
           <button class="btn" data-theme="random" type="button">Surprise<small>Either one</small></button>
         </div>
       </div>
-      <div class="stack">
-        <label class="lbl">Heroes: pick a class and a name for each</label>
+      <div class="stack" id="slotBox">
+        <label class="lbl">Heroes: pick a class, a path and a name for each</label>
         <div class="slots" id="slots"></div>
         <div class="classInfo" id="classInfo"></div>
+      </div>
+      <div class="stack" id="squadBox" hidden>
+        <label class="lbl">Your squad</label>
+        <div class="squadSummary" id="squadSummary"></div>
       </div>
       <label class="toggle"><input type="checkbox" id="tipsToggle"> Show tips while I play</label>
       <div class="row2">
@@ -96,6 +157,7 @@
     <div class="card">
       <h2 id="endTitle">Victory!</h2>
       <p id="endText"></p>
+      <div class="report" id="endReport"></div>
       <button class="btn primary" id="againBtn" type="button">Play again</button>
     </div>
   </div>

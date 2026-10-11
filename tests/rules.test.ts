@@ -3,7 +3,7 @@ import { BALANCE, CLASSES, DEFAULT_SQUAD } from '../app/src/rules/balance';
 import { generateLayout } from '../app/src/rules/map';
 import { makeRng } from '../app/src/rules/rng';
 import {
-  abilityTargets, attackTargets, canSee, coverAt, createGame, endEnemyTurn, endPlayerTurn, hitInfo, living, los,
+  abilityTargets, attackTargets, canAttackFrom, canSee, coverAt, createGame, endEnemyTurn, endPlayerTurn, hitInfo, living, los,
   moveAttackOption, moveTiles, pathTo, performTurret, turretTargets, performAbility, performAttack, performGuard, performMove, performMoveAttack, reach
 } from '../app/src/rules/game';
 import { deserialize, serialize } from '../app/src/rules/save';
@@ -323,15 +323,30 @@ describe('melee heroes', () => {
     expect(opt.info.dmg).toBe(CLASSES.knight.dmg + 1);
   });
 
-  it('a melee defeat gives back 1 action', () => {
+  it('a melee defeat refunds the attack: first action keeps 2, second keeps 1', () => {
     const s = blank({ seed: 2 });
     const k = put(s, 'knight', 'hero', 5, 6);
     const g = put(s, 'grunt', 'gob', 5, 5, 1);
+    const g2 = put(s, 'grunt', 'gob', 4, 6, 1);
     put(s, 'grunt', 'gob', 0, 0);
     const ev = performAttack(s, k, g);
     expect(g.alive).toBe(false);
-    expect(k.ap).toBe(1);
+    expect(k.ap).toBe(2);
     expect(ev.some(e => e.t === 'momentum')).toBe(true);
+    k.ap = 1;
+    performAttack(s, k, g2);
+    expect(g2.alive).toBe(false);
+    expect(k.ap).toBe(1);
+  });
+
+  it('melee reaches diagonally, and toe-to-toe fights ignore cover', () => {
+    const s = blank();
+    const k = put(s, 'knight', 'hero', 5, 6);
+    const g = put(s, 'grunt', 'gob', 6, 5);
+    wall(s, 6, 6);
+    expect(attackTargets(s, k)).toContain(g);
+    expect(canAttackFrom(s, g, k, 6, 5)).toBe(true);
+    expect(hitInfo(s, k, g).cover).toBe(0);
   });
 
   it('ranged defeats do not give actions back', () => {
