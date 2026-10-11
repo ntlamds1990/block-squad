@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#151b2f">
+<meta name="description" content="Blocky fantasy squad tactics for two players and the CPU.">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<title>Block Squad</title>
+<style>body{margin:0}[hidden]{display:none!important}</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@500;700&family=Nunito:wght@500;700;800&display=swap">
+</head>
+<body>
+<div id="app">
+  <canvas id="scene" aria-label="Battlefield"></canvas>
+  <div id="labels"></div>
+  <header id="top">
+    <div id="turn">Turn 1<small>Your move</small></div>
+    <div id="topBtns">
+      <button class="btn icon-btn" id="muteBtn" type="button" aria-label="Sound on">🔊</button>
+      <button class="btn icon-btn" id="menuBtn" type="button" aria-label="Menu">☰</button>
+      <button class="btn icon-btn" id="centerBtn" type="button" aria-label="Centre the camera on the map">⌖</button>
+      <button class="btn primary" id="endTurn" type="button">End turn</button>
+    </div>
+  </header>
+  <div id="banner"></div>
+  <div id="coach" hidden role="status">
+    <div class="who" aria-hidden="true">🧙</div>
+    <div id="coachText"></div>
+    <div class="row"><button class="skip" id="coachSkip" type="button">Hide tips</button><button class="btn" id="coachOk" type="button">Got it</button></div>
+  </div>
+  <section id="panel" aria-label="Commands">
+    <div class="inner">
+      <div id="roster"></div>
+      <div id="actions">
+        <button class="btn" id="btnAttack" type="button">Attack</button>
+        <button class="btn" id="btnAbility" type="button">Ability</button>
+        <button class="btn" id="btnGuard" type="button">Overwatch<small>Ends turn</small></button>
+        <button class="btn go" id="btnConfirm" type="button" disabled>Confirm</button>
+      </div>
+      <div id="hint">Tap one of your heroes to begin.</div>
+    </div>
+  </section>
+
+  <div class="overlay" id="start">
+    <div class="card">
+      <div class="eyebrow">Fantasy squad tactics</div>
+      <h1>Block Squad</h1>
+      <p>Goblins are raiding the realm. Build a squad of four heroes and drive them out.</p>
+      <div class="stack" id="continueBox" hidden>
+        <button class="btn primary" id="continueBtn" type="button">Continue battle</button>
+        <div class="saveInfo" id="saveInfo"></div>
+      </div>
+      <button class="btn" id="newBtn" type="button">New battle</button>
+    </div>
+  </div>
+
+  <div class="overlay" id="setup" hidden>
+    <div class="card wide">
+      <h2>Your squad</h2>
+      <div class="stack">
+        <label class="lbl">Difficulty</label>
+        <div class="seg" role="group" aria-label="Difficulty">
+          <button class="btn" data-diff="easy" type="button">Easy<small>6 goblins</small></button>
+          <button class="btn" data-diff="normal" type="button">Normal<small>+ a Troll</small></button>
+          <button class="btn" data-diff="hard" type="button">Hard<small>8 tough ones</small></button>
+        </div>
+      </div>
+      <div class="stack">
+        <label class="lbl">Map</label>
+        <div class="seg" role="group" aria-label="Map">
+          <button class="btn" data-theme="village" type="button">Village<small>Fire and a well</small></button>
+          <button class="btn" data-theme="forest" type="button">Dark Forest<small>Fog</small></button>
+          <button class="btn" data-theme="random" type="button">Surprise<small>Either one</small></button>
+        </div>
+      </div>
+      <div class="stack">
+        <label class="lbl">Heroes: pick a class and a name for each</label>
+        <div class="slots" id="slots"></div>
+        <div class="classInfo" id="classInfo"></div>
+      </div>
+      <label class="toggle"><input type="checkbox" id="tipsToggle"> Show tips while I play</label>
+      <div class="row2">
+        <button class="btn" id="backBtn" type="button">Back</button>
+        <button class="btn primary" id="startBtn" type="button">Start battle</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="end" hidden>
+    <div class="card">
+      <h2 id="endTitle">Victory!</h2>
+      <p id="endText"></p>
+      <button class="btn primary" id="againBtn" type="button">Play again</button>
+    </div>
+  </div>
+</div>
+<script type="module" src="./src/main.ts"></script>
+</body>
+</html>
