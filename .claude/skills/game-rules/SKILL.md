@@ -28,6 +28,9 @@ playtest simulator all use exactly the same rules as the real game.
 - Fire burns 1 per round for anyone standing in it, burns wood/hay/leaves away and can spread.
 - Standing next to a well heals 1 at the start of your turn.
 - Dark Forest fog: heroes see 4.5 tiles, goblins 6.
+- Knight: Shield (-1 damage from arrows, bolts and area spells, min 1), Charge (move-then-attack reaches 1 extra tile, +1 damage), Spin Attack 3 damage to every adjacent goblin.
+- Momentum (Knight, Builder): a melee defeat (sword, pickaxe or Spin) gives back 1 action.
+- Builder: Build makes a tall wall in 1 action; Turret (1 action, one per Builder, up to 2 tiles away) has 3 hearts and shoots at the end of each player turn. Turrets don't count as heroes for winning or losing.
 - Trolls walk through walls (2 movement per wall, destroying it). Shamans heal goblins for 2 and summon up to 2 small goblins.
 
 ## After changing rules or balance

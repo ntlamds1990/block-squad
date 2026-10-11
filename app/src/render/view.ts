@@ -323,6 +323,29 @@ export class View {
     m.visible = true;
     this.hlUsed++;
   }
+  private lines: THREE.Group | null = null;
+  private dotGeo = new THREE.BoxGeometry(0.09, 0.09, 0.09);
+  private dotMat = new THREE.MeshBasicMaterial({ color: 0xff6a4a, depthTest: false, transparent: true, opacity: 0.95 });
+  // Dotted sight lines from a tile to targets: [fromX, fromZ, toX, toZ]
+  setLines(list: [number, number, number, number][]) {
+    if (this.lines) { this.scene.remove(this.lines); this.lines = null; }
+    if (!list.length) return;
+    const g = new THREE.Group();
+    for (const [ax, az, bx, bz] of list) {
+      const ay = this.height(ax, az) + 0.9, by = this.height(bx, bz) + 0.9;
+      const n = Math.max(2, Math.round(Math.hypot(bx - ax, bz - az) * 3));
+      for (let i = 1; i < n; i++) {
+        const k = i / n;
+        const d = new THREE.Mesh(this.dotGeo, this.dotMat);
+        d.position.set(ax + (bx - ax) * k, ay + (by - ay) * k, az + (bz - az) * k);
+        d.renderOrder = 4;
+        g.add(d);
+      }
+    }
+    this.lines = g;
+    this.scene.add(g);
+  }
+
   hlClear() { this.hlPool.forEach(m => { m.visible = false; }); this.hlUsed = 0; }
 
   /* ---------- Effects ---------- */
@@ -556,6 +579,11 @@ export class View {
               await this.projectile(new THREE.Vector3(v.x, 1.1, v.z), new THREE.Vector3(e.x, 1.0, e.z), v.team === 'gob' ? 'hex' : 'light');
             }
             break;
+          case 'turret':
+            await this.lunge(v, e.x, e.z);
+            sfx('build');
+            this.burst(new THREE.Vector3(e.x, 0.5, e.z), '#9a9a9a', 10, 0.12, 3);
+            break;
           case 'summon':
             sfx('summon');
             this.burst(new THREE.Vector3(e.x, 0.6, e.z), '#b48cff', 14, 0.12, 3);
@@ -571,6 +599,14 @@ export class View {
         this.updateFog();
         await this.tween(0.3, k => { v.group.scale.setScalar(Math.max(0.01, k)); });
         v.group.scale.setScalar(1);
+        return;
+      }
+      case 'momentum': {
+        const v = this.units.get(e.id);
+        if (!v) return;
+        play('guard');
+        this.floatText(new THREE.Vector3(v.group.position.x, 2.2, v.group.position.z), '+1 action!', '#7cff8a');
+        await this.wait(0.3);
         return;
       }
       case 'pinned': {

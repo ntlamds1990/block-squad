@@ -7,7 +7,7 @@ import type { GameEvent, GameState, Unit } from './types';
 import {
   abilityOf, abilityTargets, adjacent, area3, canAttackFrom, canSee, coverAt, def, dist, enemiesOf,
   hitInfo, living, moveTiles, pathTo, performAbility, performAttack, performDig, performGuard, performMove,
-  performMoveAttack, performShamanHeal, tileAt, unitAt, unitById, type PathNode
+  performMoveAttack, performShamanHeal, performTurret, tileAt, turretTargets, unitAt, unitById, los, moveAttackTiles, type PathNode
 } from './game';
 
 export type Action =
@@ -17,6 +17,7 @@ export type Action =
   | { k: 'ability'; x: number; z: number }
   | { k: 'shamanHeal'; target: string }
   | { k: 'dig'; x: number; z: number }
+  | { k: 'turret'; x: number; z: number }
   | { k: 'guard' }
   | { k: 'end' };
 
@@ -79,7 +80,7 @@ function abilityOptions(s: GameState, u: Unit): Scored[] {
     case 'spin': {
       const hit = foes.filter(g => adjacent(u.x, u.z, g.x, g.z));
       const v = hit.reduce((a, g) => a + sureValue(g, ab.amount!), 0);
-      if (hit.length >= 2 || hit.some(g => g.hp <= ab.amount!)) out.push({ a: { k: 'ability', x: u.x, z: u.z }, score: v });
+      if (hit.length) out.push({ a: { k: 'ability', x: u.x, z: u.z }, score: v + (hit.length >= 2 ? 4 : 0) });
       break;
     }
     case 'volley':
@@ -125,7 +126,7 @@ function shamanHealOptions(s: GameState, u: Unit): Scored[] {
     .map(f => ({ a: { k: 'shamanHeal', target: f.id } as Action, score: Math.min(SHAMAN_HEAL, f.maxHp - f.hp) * 7 + (f.hp <= 2 ? 8 : 0) }));
 }
 
-function attackOptions(s: GameState, u: Unit, tiles: Map<string, PathNode>): Scored[] {
+function attackOptions(s: GameState, u: Unit): Scored[] {
   const out: Scored[] = [];
   if (u.ap <= 0) return out;
   const foes = enemiesOf(s, u).filter(e => canSee(s, u.team, e));
@@ -136,10 +137,10 @@ function attackOptions(s: GameState, u: Unit, tiles: Map<string, PathNode>): Sco
     }
     if (u.ap < 2) continue;
     let best: Scored | null = null;
-    tiles.forEach(n => {
+    moveAttackTiles(s, u).forEach(n => {
       if (tileAt(s, n.x, n.z)!.fire > 0) return;
       if (!canAttackFrom(s, u, t, n.x, n.z)) return;
-      const info = hitInfo(s, u, t, n.x, n.z);
+      const info = hitInfo(s, u, t, n.x, n.z, true);
       const score = attackValue(t, info.chance, info.dmg) + safety(s, u, n.x, n.z) * 0.5 - 0.5 - fireOnPath(s, n) * 12;
       if (!best || score > best.score) best = { a: { k: 'moveAttack', path: pathTo(n), target: t.id }, score };
     });
@@ -207,14 +208,31 @@ function buildOption(s: GameState, u: Unit): Scored | null {
   return pick ? { a: { k: 'ability', x: pick[0], z: pick[1] }, score: 6 } : null;
 }
 
+// A Builder sets up a Turret where it can see the most goblins
+function turretOption(s: GameState, u: Unit): Scored | null {
+  const cells = turretTargets(s, u);
+  if (!cells.length) return null;
+  const foes = enemiesOf(s, u).filter(e => canSee(s, u.team, e));
+  let best: Scored | null = null;
+  for (const [x, z] of cells) {
+    const n = foes.filter(e => dist(x, z, e.x, e.z) <= 5.01 && los(s, x, z, e.x, e.z)).length;
+    const near = foes.filter(e => dist(x, z, e.x, e.z) <= 8).length;
+    if (!n && !near) continue;
+    const score = 9 + n * 3 + (near ? 1 : 0);
+    if (!best || score > best.score) best = { a: { k: 'turret', x, z }, score };
+  }
+  return best;
+}
+
 export function chooseAction(s: GameState, u: Unit, o?: AiOptions): Action {
   if (!u.alive || u.ap <= 0 || s.phase === 'over') return { k: 'end' };
   const noise = noiseOf(s, u, o);
   const tiles = moveTiles(s, u);
   const options: Scored[] = [
-    ...attackOptions(s, u, tiles),
+    ...attackOptions(s, u),
     ...abilityOptions(s, u),
-    ...shamanHealOptions(s, u)
+    ...shamanHealOptions(s, u),
+    ...[turretOption(s, u)].filter((x): x is Scored => !!x)
   ].map(x => ({ ...x, score: x.score + jitter(s, noise) }));
   options.sort((a, b) => b.score - a.score);
   const top = options[0];
@@ -240,6 +258,7 @@ export function applyAction(s: GameState, u: Unit, a: Action): GameEvent[] {
     case 'ability': return performAbility(s, u, a.x, a.z);
     case 'shamanHeal': return performShamanHeal(s, u, unitById(s, a.target)!);
     case 'dig': return performDig(s, u, a.x, a.z);
+    case 'turret': return performTurret(s, u, a.x, a.z);
     case 'guard': return performGuard(s, u);
     case 'end': u.ap = 0; return [];
   }

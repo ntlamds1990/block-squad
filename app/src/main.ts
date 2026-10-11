@@ -6,7 +6,7 @@ import type { GameEvent, GameState, Theme, Unit } from './rules/types';
 import {
   abilityOf, abilityReady, abilityTargets, adjacent, area3, attackTargets, canAttackFrom, canSee, createGame, def,
   digTargets, endEnemyTurn, endPlayerTurn, hAt, hitInfo, key, living, moveAttackOption, moveAttackTargets, moveTiles,
-  pathTo, performAbility, performAttack, performDig, performGuard, performMove, performMoveAttack, reach, reachFrom,
+  pathTo, performTurret, turretTargets, moveAttackTiles, performAbility, performAttack, performDig, performGuard, performMove, performMoveAttack, reach, reachFrom,
   tileAt, unitAt, unitById, type PathNode, type SquadMember
 } from './rules/game';
 import { applyAction, chooseAction, turnOrder } from './rules/ai';
@@ -28,12 +28,13 @@ type Pending =
   | { kind: 'attack'; target: string; x: number; z: number }
   | { kind: 'moveattack'; target: string; x: number; z: number; node: PathNode }
   | { kind: 'dig'; x: number; z: number }
-  | { kind: 'ability'; x: number; z: number };
+  | { kind: 'ability'; x: number; z: number }
+  | { kind: 'turret'; x: number; z: number };
 
 let s: GameState = createGame({ seed: 1, diff: 'easy', theme: 'village', squad: DEFAULT_SQUAD });
 const U = {
   sel: null as string | null,
-  mode: 'move' as 'move' | 'attack' | 'ability',
+  mode: 'move' as 'move' | 'attack' | 'ability' | 'turret',
   pending: null as Pending | null,
   plan: null as { path: { x: number; z: number }[]; end: { x: number; z: number } } | null,
   inspect: null as string | null,
@@ -183,6 +184,25 @@ function planReach(u: Unit): Map<string, PathNode> {
   return r;
 }
 
+// Goblins a hero could attack after walking the planned route (walls in the way block shots)
+function planShots(u: Unit): { canHit: Unit[]; blocked: Unit[] } {
+  const out = { canHit: [] as Unit[], blocked: [] as Unit[] };
+  if (!U.plan || u.ap < 2) return out;
+  const { x, z } = U.plan.end;
+  for (const e of living(s, 'gob')) {
+    if (!canSee(s, 'hero', e)) continue;
+    if (canAttackFrom(s, u, e, x, z)) out.canHit.push(e);
+    else if (def(u).range > 1 && Math.hypot(e.x - x, e.z - z) <= def(u).range + 0.01) out.blocked.push(e);
+  }
+  return out;
+}
+
+function planNode(u: Unit): PathNode {
+  let n: PathNode = { x: u.x, z: u.z, d: 0, prev: null };
+  for (const st of U.plan!.path) n = { x: st.x, z: st.z, d: n.d + 1, prev: n };
+  return n;
+}
+
 function walkPlan() {
   const u = sel(), plan = U.plan;
   if (!u || !plan || U.busy) return;
@@ -204,6 +224,8 @@ async function confirmPending() {
       await animate(performMoveAttack(s, u, pathTo(p.node), unitById(s, p.target)!));
     } else if (p.kind === 'dig') {
       await animate(performDig(s, u, p.x, p.z));
+    } else if (p.kind === 'turret') {
+      await animate(performTurret(s, u, p.x, p.z));
     } else {
       U.flags.add('ability');
       await animate(performAbility(s, u, p.x, p.z));
@@ -223,13 +245,27 @@ function handleTap(x: number, z: number) {
   if (p && p.x === x && p.z === z) { confirmPending(); return; }
   if (U.plan && U.mode === 'move' && U.plan.end.x === x && U.plan.end.z === z) { walkPlan(); return; }
   if (u && U.mode === 'ability' && abilityTargets(s, u).some(([ax, az]) => ax === x && az === z)) { setPendingAbility(x, z); return; }
+  if (u && U.mode === 'turret') {
+    if (turretTargets(s, u).some(([ax, az]) => ax === x && az === z)) { U.pending = { kind: 'turret', x, z }; play('click'); renderAll(); }
+    else { U.mode = 'move'; U.pending = null; renderAll(); }
+    return;
+  }
   if (visibleThere && visibleThere === u && U.mode === 'move' && U.plan) { U.plan = null; renderAll(); return; }
-  if (visibleThere && visibleThere.team === 'hero') { play('click'); setSel(visibleThere.id); return; }
+  if (visibleThere && visibleThere.team === 'hero' && !CLASSES[visibleThere.cls].structure) { play('click'); setSel(visibleThere.id); return; }
   if (!u) {
     if (visibleThere) { U.inspect = visibleThere.id; renderAll(); }
     return;
   }
   if (U.mode === 'ability') { U.mode = 'move'; U.pending = null; renderAll(); return; }
+  if (visibleThere && visibleThere.team === 'gob' && U.plan && planShots(u).canHit.includes(visibleThere)) {
+    U.mode = 'attack';
+    U.inspect = visibleThere.id;
+    U.pending = { kind: 'moveattack', target: visibleThere.id, x, z, node: planNode(u) };
+    U.plan = null;
+    play('click');
+    renderAll();
+    return;
+  }
   if (visibleThere && visibleThere.team === 'gob') {
     U.plan = null;
     U.inspect = visibleThere.id;
@@ -247,7 +283,7 @@ function handleTap(x: number, z: number) {
     if (t) { U.mode = 'attack'; U.pending = { kind: 'dig', x, z }; renderAll(); return; }
   }
   if (p && p.kind === 'moveattack') {
-    const n = moveTiles(s, u).get(key(x, z));
+    const n = moveAttackTiles(s, u).get(key(x, z));
     const target = unitById(s, p.target)!;
     if (n && canAttackFrom(s, u, target, n.x, n.z)) { U.pending = { ...p, node: n }; renderAll(); return; }
   }
@@ -277,6 +313,7 @@ const INSPECT = '#9b6bff';
 
 function renderHighlights() {
   view.hlClear();
+  view.setLines([]);
   view.selected = s.phase === 'player' ? U.sel : null;
   view.inspected = U.inspect;
   const g = U.inspect ? unitById(s, U.inspect) : null;
@@ -290,8 +327,18 @@ function renderHighlights() {
     if (U.plan) {
       U.plan.path.forEach(n => view.hl(n.x, n.z, tileAt(s, n.x, n.z)!.fire > 0 ? COL.attack : COL.area, 0.5));
       view.hl(U.plan.end.x, U.plan.end.z, COL.area, 0.9);
+      // What the hero could hit from the end of the route: red with a sight line, grey if a wall is in the way
+      const shots = planShots(u);
+      shots.canHit.forEach(t => view.hl(t.x, t.z, COL.attack, 0.7));
+      shots.blocked.forEach(t => view.hl(t.x, t.z, '#5a6080', 0.6));
+      view.setLines(shots.canHit.map(t => [U.plan!.end.x, U.plan!.end.z, t.x, t.z]));
+    } else {
+      attackTargets(s, u).forEach(t => view.hl(t.x, t.z, COL.attack, 0.6));
+      // In range but a tall wall blocks the shot
+      if (def(u).range > 1) living(s, 'gob').forEach(e => {
+        if (canSee(s, 'hero', e) && !canAttackFrom(s, u, e, u.x, u.z) && Math.hypot(e.x - u.x, e.z - u.z) <= def(u).range + 0.01) view.hl(e.x, e.z, '#5a6080', 0.6);
+      });
     }
-    attackTargets(s, u).forEach(t => view.hl(t.x, t.z, COL.attack, 0.6));
     if (!U.plan) moveAttackTargets(s, u).forEach(t => view.hl(t.x, t.z, COL.attack, 0.28));
     digTargets(s, u).forEach(t => view.hl(t.x, t.z, COL.dig, 0.55, t.blocks.length));
   }
@@ -302,11 +349,15 @@ function renderHighlights() {
     const pm = U.pending;
     if (pm && pm.kind === 'moveattack') {
       const target = unitById(s, pm.target)!;
-      moveTiles(s, u).forEach(n => { if (canAttackFrom(s, u, target, n.x, n.z)) view.hl(n.x, n.z, COL.move, 0.35); });
+      moveAttackTiles(s, u).forEach(n => { if (canAttackFrom(s, u, target, n.x, n.z)) view.hl(n.x, n.z, COL.move, 0.35); });
       pathTo(pm.node).forEach(n => view.hl(n.x, n.z, COL.area, 0.45));
       view.hl(pm.node.x, pm.node.z, COL.area, 0.9);
     }
     if (pm) view.hl(pm.x, pm.z, COL.area, 0.85, pm.kind === 'dig' ? hAt(s, pm.x, pm.z) : 0);
+  }
+  if (U.mode === 'turret') {
+    turretTargets(s, u).forEach(([x, z]) => view.hl(x, z, COL.ability, 0.5));
+    if (U.pending) view.hl(U.pending.x, U.pending.z, COL.area, 0.85);
   }
   if (U.mode === 'ability') {
     const ab = abilityOf(u)!;
@@ -330,7 +381,10 @@ function previews(): Map<string, number> {
   const out = new Map<string, number>();
   const u = sel(), p = U.pending;
   if (!u || !p || s.phase !== 'player') return out;
-  if (p.kind === 'attack' || p.kind === 'moveattack') out.set(p.target, def(u).dmg);
+  if (p.kind === 'attack' || p.kind === 'moveattack') {
+    const t = unitById(s, p.target)!;
+    out.set(p.target, p.kind === 'attack' ? hitInfo(s, u, t).dmg : hitInfo(s, u, t, p.node.x, p.node.z, true).dmg);
+  }
   if (p.kind === 'ability') {
     const ab = abilityOf(u)!;
     if (ab.key === 'spin') living(s, 'gob').filter(g => adjacent(u.x, u.z, g.x, g.z)).forEach(g => out.set(g.id, ab.amount!));
@@ -351,7 +405,7 @@ function hearts(u: Unit) {
 function renderPanel() {
   const roster = $('roster');
   roster.innerHTML = '';
-  s.units.filter(u => u.team === 'hero').forEach(u => {
+  s.units.filter(u => u.team === 'hero' && !CLASSES[u.cls].structure).forEach(u => {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'chip' + (u.id === U.sel ? ' sel' : '') + (u.alive ? '' : ' dead');
@@ -374,17 +428,24 @@ function renderPanel() {
     abl.innerHTML = `${ab.name}<small>${u.cd > 0 ? 'Ready in ' + u.cd : abilityTargets(s, u).length === 0 ? noTarget : ab.cd === 0 ? '1 action' : 'Ready'}</small>`;
     atk.disabled = !mine || u.ap <= 0 || (attackTargets(s, u).length === 0 && digTargets(s, u).length === 0 && moveAttackTargets(s, u).length === 0);
     guard.disabled = !mine || u.ap <= 0;
+    const tb = $<HTMLButtonElement>('btnTurret');
+    tb.hidden = u.cls !== 'builder';
+    const hasTurret = s.units.some(x => x.alive && x.owner === u.id);
+    tb.innerHTML = `Turret<small>${hasTurret ? 'Already up' : '1 action'}</small>`;
+    tb.disabled = !mine || turretTargets(s, u).length === 0;
+    tb.classList.toggle('on', U.mode === 'turret');
     abl.disabled = !mine || !abilityReady(s, u);
   } else {
     atk.innerHTML = 'Attack<small>&nbsp;</small>';
     abl.innerHTML = 'Ability<small>&nbsp;</small>';
     atk.disabled = abl.disabled = guard.disabled = true;
+    $('btnTurret').hidden = true;
   }
   atk.classList.toggle('on', U.mode === 'attack');
   abl.classList.toggle('on', U.mode === 'ability');
   conf.disabled = !mine || (!U.pending && !U.plan);
   const p = U.pending;
-  conf.textContent = !p ? (U.plan ? 'Move!' : 'Confirm') : p.kind === 'attack' ? 'Attack!' : p.kind === 'moveattack' ? 'Go!' : p.kind === 'dig' ? 'Dig!'
+  conf.textContent = !p ? (U.plan ? 'Move!' : 'Confirm') : p.kind === 'attack' ? 'Attack!' : p.kind === 'moveattack' ? 'Go!' : p.kind === 'dig' ? 'Dig!' : p.kind === 'turret' ? 'Build!'
     : u && abilityOf(u)!.key === 'build' ? 'Build!' : u && abilityOf(u)!.key === 'heal' ? 'Heal!' : 'Cast!';
   $('hint').innerHTML = hintText();
   const m = $('muteBtn');
@@ -412,7 +473,7 @@ function hintText(): string {
   const p = U.pending;
   if (p && (p.kind === 'attack' || p.kind === 'moveattack')) {
     const t = unitById(s, p.target)!;
-    const i = p.kind === 'attack' ? hitInfo(s, u, t) : hitInfo(s, u, t, p.node.x, p.node.z);
+    const i = p.kind === 'attack' ? hitInfo(s, u, t) : hitInfo(s, u, t, p.node.x, p.node.z, true);
     const pre = p.kind === 'moveattack' ? '<strong>Walk to the yellow tile, then attack</strong> (uses both actions). Tap another blue tile to attack from there.<br>' : '';
     const g2 = BALANCE.graze;
     const left = (n: number) => (n === 0 ? '<strong>defeated</strong>' : n + '♥ left');
@@ -420,6 +481,8 @@ function hintText(): string {
     return `${pre}<strong>${esc(t.name)}</strong> ${t.hp}♥ · <span class="pct">${i.chance}% to hit</span> · ${coverWord(i.cover)}` +
       `<br>Hit: -${i.dmg}, ${left(Math.max(0, t.hp - i.dmg))} · Miss: -${g2}, ${left(Math.max(0, t.hp - g2))} · Expected ${expected} damage`;
   }
+  if (p && p.kind === 'turret') return '<strong>Turret</strong> goes here. It shoots a goblin in range 5 at the end of each of your turns. Costs 1 action. Tap again or press Build!';
+  if (U.mode === 'turret') return 'Tap an orange tile to set up a crossbow Turret (up to 2 tiles away). It has 3♥ and shoots at the end of each of your turns.';
   if (p && p.kind === 'dig') return '<strong>Dig</strong> out the top block here. Costs 1 action. Tap again or press Dig!';
   if (p && p.kind === 'ability') {
     const ab = abilityOf(u)!;
@@ -440,12 +503,25 @@ function hintText(): string {
     const left = def(u).move - planSteps();
     const burns = U.plan.path.filter(n => tileAt(s, n.x, n.z)!.fire > 0).length;
     return `<strong>Route planned</strong>: ${planSteps()} of ${def(u).move} tiles. Tap the yellow end tile again (or Move!) to walk${left > 0 ? ', or tap a blue tile to add a stop.' : '.'} Tap ${esc(u.name)} to clear it.` +
-      (burns ? ` <strong>Careful:</strong> this route walks through fire (-${burns}♥).` : '');
+      (burns ? ` <strong>Careful:</strong> this route walks through fire (-${burns}♥).` : '') + planShotText(u);
   }
   if (U.mode === 'ability') return abilityOf(u)!.desc + (abilityOf(u)!.key === 'spin' ? ' Press Cast! to spin.' : ' Tap a highlighted tile.');
   if (U.mode === 'attack') return 'Tap a goblin on a red tile to aim.' + (u.cls === 'builder' ? ' Tap a brown block to dig it out.' : '');
   if (u.ap <= 0) return `<strong>${esc(u.name)}</strong> ${u.guard ? 'is on Overwatch and will shoot the first goblin that moves into range.' : 'is done this turn.'} Pick another hero or end the turn.`;
-  return `<strong>${esc(u.name)}</strong> has ${u.ap} ${u.ap === 1 ? 'action' : 'actions'}. Tap a blue tile to plan a route, or a goblin on a red tile to attack.`;
+  return `<strong>${esc(u.name)}</strong> has ${u.ap} ${u.ap === 1 ? 'action' : 'actions'}. Tap a blue tile to plan a route and see who you can hit from there, or a goblin on a red tile to attack.` + (def(u).range > 1 ? ' Grey goblins are in range but behind a tall wall.' : '');
+}
+
+function planShotText(u: Unit): string {
+  if (!U.plan) return '';
+  if (u.ap < 2) return '<br>No action left to attack after this move.';
+  const { canHit, blocked } = planShots(u);
+  const { x, z } = U.plan.end;
+  let out = '<br>From here: ';
+  if (canHit.length) {
+    out += canHit.map(e => `${esc(e.name)} <span class="pct">${hitInfo(s, u, e, x, z, true).chance}%</span>`).join(', ') + '. Tap one to walk and attack.';
+  } else out += def(u).range === 1 ? 'no goblin next to this tile.' : 'no clear shot at any goblin.';
+  if (blocked.length) out += ` ${blocked.length} in range ${blocked.length === 1 ? 'is' : 'are'} behind a tall wall (grey).`;
+  return out;
 }
 
 function renderAll() {
@@ -484,6 +560,15 @@ $('btnAbility').addEventListener('click', () => {
   renderAll();
 });
 $('btnConfirm').addEventListener('click', () => { unlockAudio(); confirmPending(); });
+$('btnTurret').addEventListener('click', () => {
+  const u = sel();
+  if (!myTurn() || !u) return;
+  play('click');
+  U.plan = null;
+  U.mode = U.mode === 'turret' ? 'move' : 'turret';
+  U.pending = null;
+  renderAll();
+});
 $('btnGuard').addEventListener('click', () => {
   const u = sel();
   if (!myTurn() || !u || u.ap <= 0) return;

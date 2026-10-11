@@ -27,6 +27,7 @@ export interface Unit {
   alive: boolean;
   guard: boolean;
   summons: number;
+  owner?: string;  // who placed it (Turrets)
 }
 
 export interface GameState {
@@ -56,4 +57,5 @@ export type GameEvent =
   | { t: 'ability'; id: string; key: string; x: number; z: number }
   | { t: 'summon'; id: string; by: string }
   | { t: 'guard'; id: string }
-  | { t: 'pinned'; id: string };
+  | { t: 'pinned'; id: string }
+  | { t: 'momentum'; id: string };

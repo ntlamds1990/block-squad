@@ -4,7 +4,7 @@ import { generateLayout } from '../app/src/rules/map';
 import { makeRng } from '../app/src/rules/rng';
 import {
   abilityTargets, attackTargets, canSee, coverAt, createGame, endEnemyTurn, endPlayerTurn, hitInfo, living, los,
-  moveAttackOption, moveTiles, pathTo, performAbility, performAttack, performGuard, performMove, performMoveAttack, reach
+  moveAttackOption, moveTiles, pathTo, performTurret, turretTargets, performAbility, performAttack, performGuard, performMove, performMoveAttack, reach
 } from '../app/src/rules/game';
 import { deserialize, serialize } from '../app/src/rules/save';
 import { blank, put, wall } from './helpers';
@@ -214,7 +214,7 @@ describe('abilities', () => {
     const k = put(s, 'knight', 'hero', 5, 5);
     const g1 = put(s, 'grunt', 'gob', 6, 5, 5), g2 = put(s, 'grunt', 'gob', 5, 4, 5), g3 = put(s, 'grunt', 'gob', 8, 5, 5);
     performAbility(s, k, 5, 5);
-    expect([g1.hp, g2.hp, g3.hp]).toEqual([3, 3, 5]);
+    expect([g1.hp, g2.hp, g3.hp]).toEqual([2, 2, 5]);
     expect(k.cd).toBe(CLASSES.knight.ability!.cd);
   });
 
@@ -290,14 +290,84 @@ describe('abilities', () => {
     expect(living(s, 'gob')[1].hp).toBe(BALANCE.shaman.summonHp);
   });
 
-  it('Build costs one action and makes a low wall tall', () => {
+  it('Build puts up a tall wall in one action', () => {
     const s = blank();
     const b = put(s, 'builder', 'hero', 5, 5);
     performAbility(s, b, 5, 4);
     expect(b.ap).toBe(1);
-    performAbility(s, b, 5, 4);
     expect(s.tiles[4][5].blocks).toHaveLength(2);
     expect(abilityTargets(s, b).some(([x, z]) => x === 5 && z === 4)).toBe(false);
+  });
+});
+
+describe('melee heroes', () => {
+  it('a Knight\'s shield takes 1 off arrows and area spells, never below 1', () => {
+    const s = blank();
+    const k = put(s, 'knight', 'hero', 5, 10);
+    const g = put(s, 'garcher', 'gob', 5, 5);
+    expect(hitInfo(s, g, k).dmg).toBe(1);
+    const grunt = put(s, 'grunt', 'gob', 5, 11);
+    expect(hitInfo(s, grunt, k).dmg).toBe(2);
+    k.team = 'gob'; // pretend the Knight is the target of a hero Volley (1 damage stays 1)
+    const a = put(s, 'archer', 'hero', 9, 14);
+    performAbility(s, a, 5, 10);
+    expect(k.hp).toBe(5);
+  });
+
+  it('a Knight charges: one extra tile and +1 damage when walking then attacking', () => {
+    const s = blank();
+    const k = put(s, 'knight', 'hero', 5, 12);
+    const g = put(s, 'troll', 'gob', 5, 6, 20); // 5 steps to stand next to it, Knight walks 4
+    const opt = moveAttackOption(s, k, g)!;
+    expect(opt).not.toBeNull();
+    expect(opt.info.dmg).toBe(CLASSES.knight.dmg + 1);
+  });
+
+  it('a melee defeat gives back 1 action', () => {
+    const s = blank({ seed: 2 });
+    const k = put(s, 'knight', 'hero', 5, 6);
+    const g = put(s, 'grunt', 'gob', 5, 5, 1);
+    put(s, 'grunt', 'gob', 0, 0);
+    const ev = performAttack(s, k, g);
+    expect(g.alive).toBe(false);
+    expect(k.ap).toBe(1);
+    expect(ev.some(e => e.t === 'momentum')).toBe(true);
+  });
+
+  it('ranged defeats do not give actions back', () => {
+    const s = blank();
+    const a = put(s, 'archer', 'hero', 5, 9);
+    const g = put(s, 'grunt', 'gob', 5, 5, 1);
+    put(s, 'grunt', 'gob', 0, 0);
+    performAttack(s, a, g);
+    expect(a.ap).toBe(0);
+  });
+});
+
+describe('turret', () => {
+  it('a Builder places one Turret, which shoots at the end of the turn', () => {
+    const s = blank();
+    const b = put(s, 'builder', 'hero', 5, 10);
+    const g = put(s, 'troll', 'gob', 5, 5, 20);
+    expect(turretTargets(s, b).length).toBeGreaterThan(0);
+    performTurret(s, b, 5, 9);
+    expect(b.ap).toBe(1);
+    expect(turretTargets(s, b)).toHaveLength(0);
+    const ev = endPlayerTurn(s);
+    expect(ev.some(e => e.t === 'attack')).toBe(true);
+    expect(g.hp).toBeLessThan(20);
+  });
+
+  it('a Turret is not a hero: it can be attacked but does not keep the squad alive', () => {
+    const s = blank();
+    const b = put(s, 'builder', 'hero', 5, 10);
+    performTurret(s, b, 6, 9);
+    const g = put(s, 'grunt', 'gob', 6, 10);
+    expect(living(s, 'hero')).toHaveLength(1);
+    expect(attackTargets(s, g).length).toBe(2);
+    b.hp = 1;
+    performAttack(s, g, b);
+    expect(s.winner).toBe('gob');
   });
 });
 

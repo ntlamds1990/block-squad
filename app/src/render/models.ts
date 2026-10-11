@@ -123,6 +123,15 @@ export function buildModel(cls: ClassId, team: 'hero' | 'gob', small = false): M
       part(0.1, 0.1, 0.1, '#b48cff', 0.33, 1.35, 0.12, { glow: true });
       body.scale.setScalar(0.86);
       break;
+    case 'turret':
+      part(0.7, 0.5, 0.7, '#808080', 0, 0.25, 0);
+      part(0.76, 0.08, 0.76, '#6b6b6b', 0, 0.52, 0);
+      part(0.12, 0.3, 0.12, '#6b4a2b', 0, 0.71, 0);
+      part(0.16, 0.12, 0.7, '#8a5a2c', 0, 0.9, 0.05);
+      part(0.7, 0.06, 0.08, '#5a3d22', 0, 0.93, 0.3);
+      part(0.04, 0.04, 0.5, '#e9e2d2', 0, 0.98, 0.15);
+      part(0.08, 0.08, 0.08, '#4c9bff', 0, 1.0, -0.28, { glow: true });
+      break;
     case 'troll':
       part(0.26, 0.5, 0.3, '#5d6b4a', -0.17, 0.25, 0);
       part(0.26, 0.5, 0.3, '#5d6b4a', 0.17, 0.25, 0);

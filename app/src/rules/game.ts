@@ -51,8 +51,11 @@ export const tileAt = (s: GameState, x: number, z: number): Tile | null => insid
 export const hAt = (s: GameState, x: number, z: number) => inside(s, x, z) ? s.tiles[z][x].blocks.length : 0;
 export const unitAt = (s: GameState, x: number, z: number) => s.units.find(u => u.alive && u.x === x && u.z === z) ?? null;
 export const unitById = (s: GameState, id: string) => s.units.find(u => u.id === id) ?? null;
-export const living = (s: GameState, team: Team) => s.units.filter(u => u.alive && u.team === team);
-export const enemiesOf = (s: GameState, u: Unit) => living(s, u.team === 'hero' ? 'gob' : 'hero');
+// Heroes and goblins that act and count for winning (placed Turrets are left out)
+export const living = (s: GameState, team: Team) => s.units.filter(u => u.alive && u.team === team && !CLASSES[u.cls].structure);
+export const structures = (s: GameState, team: Team) => s.units.filter(u => u.alive && u.team === team && !!CLASSES[u.cls].structure);
+// Everything on the other side that can be attacked, Turrets included
+export const enemiesOf = (s: GameState, u: Unit) => s.units.filter(e => e.alive && e.team !== u.team);
 export const def = (u: Unit): ClassDef => CLASSES[u.cls];
 export const abilityOf = (u: Unit): AbilityDef | undefined => CLASSES[u.cls].ability;
 export const dist = (ax: number, az: number, bx: number, bz: number) => Math.hypot(ax - bx, az - bz);
@@ -158,8 +161,14 @@ export function canAttackFrom(s: GameState, a: Unit, t: Unit, fx: number, fz: nu
   return dist(fx, fz, t.x, t.z) <= def(a).range + 0.01 && los(s, fx, fz, t.x, t.z);
 }
 
+// A Knight's shield takes 1 off damage from arrows, bolts and area spells, never below 1
+export function shielded(t: Unit, dmg: number): number {
+  const sh = def(t).shield ?? 0;
+  return sh ? Math.max(1, dmg - sh) : dmg;
+}
+
 export interface HitInfo { chance: number; cover: number; dmg: number }
-export function hitInfo(s: GameState, a: Unit, t: Unit, fx = a.x, fz = a.z): HitInfo {
+export function hitInfo(s: GameState, a: Unit, t: Unit, fx = a.x, fz = a.z, charging = false): HitInfo {
   const C = def(a);
   const cover = coverAt(s, t.x, t.z, fx, fz);
   let chance = C.aim;
@@ -169,7 +178,9 @@ export function hitInfo(s: GameState, a: Unit, t: Unit, fx = a.x, fz = a.z): Hit
   const d = dist(fx, fz, t.x, t.z);
   if (C.range > 1 && d > BALANCE.longRange.from) chance -= Math.round((d - BALANCE.longRange.from) * BALANCE.longRange.penaltyPerTile);
   if (a.team === 'gob') chance += BALANCE.difficulty[s.diff].goblinAim;
-  return { chance: clampChance(chance), cover, dmg: C.dmg };
+  let dmg = C.dmg + (charging && C.charge ? C.charge.dmg : 0);
+  if (C.range > 1) dmg = shielded(t, dmg);
+  return { chance: clampChance(chance), cover, dmg };
 }
 const clampChance = (c: number) => Math.max(BALANCE.chanceLimits.min, Math.min(BALANCE.chanceLimits.max, Math.round(c)));
 
@@ -178,14 +189,22 @@ export function attackTargets(s: GameState, u: Unit): Unit[] {
   return enemiesOf(s, u).filter(t => canAttackFrom(s, u, t, u.x, u.z));
 }
 
+// Tiles a unit can walk to before attacking with its second action (a Knight's Charge reaches 1 further)
+export function moveAttackTiles(s: GameState, u: Unit): Map<string, PathNode> {
+  if (u.ap < 2) return new Map();
+  const r = reach(s, u, def(u).move + (def(u).charge?.move ?? 0));
+  r.delete(key(u.x, u.z));
+  return r;
+}
+
 // Best tile to step to with one move so the unit can attack with its second action
 export function moveAttackOption(s: GameState, u: Unit, t: Unit): { node: PathNode; info: HitInfo } | null {
   if (u.ap < 2) return null;
   let best: { node: PathNode; info: HitInfo; score: number } | null = null;
-  moveTiles(s, u).forEach(n => {
+  moveAttackTiles(s, u).forEach(n => {
     if (tileAt(s, n.x, n.z)!.fire > 0) return;
     if (!canAttackFrom(s, u, t, n.x, n.z)) return;
-    const info = hitInfo(s, u, t, n.x, n.z);
+    const info = hitInfo(s, u, t, n.x, n.z, true);
     const score = info.chance - n.d * 0.5;
     if (!best || score > best.score) best = { node: n, info, score };
   });
@@ -229,6 +248,21 @@ export function abilityTargets(s: GameState, u: Unit): [number, number][] {
   }
   return [];
 }
+// Builder: tiles where a Turret can go (one Turret per Builder at a time)
+export function turretTargets(s: GameState, u: Unit): [number, number][] {
+  if (u.cls !== 'builder' || u.ap <= 0) return [];
+  if (structures(s, u.team).some(t => t.owner === u.id)) return [];
+  const r = BALANCE.turret.range;
+  const out: [number, number][] = [];
+  for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) {
+    if ((!dx && !dz) || Math.abs(dx) + Math.abs(dz) > r) continue;
+    const x = u.x + dx, z = u.z + dz;
+    const t = tileAt(s, x, z);
+    if (t && !t.blocks.length && !t.fire && !unitAt(s, x, z)) out.push([x, z]);
+  }
+  return out;
+}
+
 export function abilityReady(s: GameState, u: Unit): boolean {
   const ab = abilityOf(u);
   return !!ab && u.ap > 0 && u.cd <= 0 && abilityTargets(s, u).length > 0;
@@ -236,7 +270,7 @@ export function abilityReady(s: GameState, u: Unit): boolean {
 
 export function attackKind(u: Unit): AttackKind {
   switch (u.cls) {
-    case 'archer': case 'garcher': return 'arrow';
+    case 'archer': case 'garcher': case 'turret': return 'arrow';
     case 'mage': return 'bolt';
     case 'cleric': return 'light';
     case 'shaman': return 'hex';
@@ -273,14 +307,21 @@ function heal(u: Unit, n: number, cause: 'ability' | 'well', ev: GameEvent[]) {
   ev.push({ t: 'heal', id: u.id, amount, cause });
 }
 
-function resolveAttack(s: GameState, a: Unit, t: Unit, penalty: number, ev: GameEvent[], overwatch = false): boolean {
-  const info = hitInfo(s, a, t);
+function resolveAttack(s: GameState, a: Unit, t: Unit, penalty: number, ev: GameEvent[], overwatch = false, charging = false): boolean {
+  const info = hitInfo(s, a, t, a.x, a.z, charging);
   const chance = clampChance(info.chance - penalty);
   const hit = next(s.rng) * 100 < chance;
   ev.push({ t: 'attack', id: a.id, target: t.id, kind: attackKind(a), hit, chance, overwatch });
   if (hit) damage(s, t, info.dmg, '-' + info.dmg, 'hit', ev);
   else damage(s, t, BALANCE.graze, 'Graze -' + BALANCE.graze, 'graze', ev);
   return hit;
+}
+
+// Momentum: a melee defeat gives the attacker 1 action back
+function momentum(a: Unit, t: Unit, ev: GameEvent[]) {
+  if (t.alive || !a.alive || !def(a).momentum || def(a).range !== 1) return;
+  a.ap = 1;
+  ev.push({ t: 'momentum', id: a.id });
 }
 
 // Returns true when an Overwatch hit stops the mover in its tracks
@@ -326,6 +367,7 @@ export function performAttack(s: GameState, a: Unit, t: Unit): GameEvent[] {
   a.ap = 0;
   a.guard = false;
   resolveAttack(s, a, t, 0, ev);
+  if (!s.winner) momentum(a, t, ev);
   return ev;
 }
 
@@ -334,7 +376,8 @@ export function performMoveAttack(s: GameState, a: Unit, path: { x: number; z: n
   // Stopped by Overwatch: the attack doesn't happen, and the hero keeps their last action
   if (!stopped && a.alive && t.alive && !s.winner && canAttackFrom(s, a, t, a.x, a.z)) {
     a.ap = 0;
-    resolveAttack(s, a, t, 0, ev);
+    resolveAttack(s, a, t, 0, ev, false, true);
+    if (!s.winner) momentum(a, t, ev);
   }
   return ev;
 }
@@ -368,11 +411,15 @@ export function performAbility(s: GameState, u: Unit, x: number, z: number): Gam
   u.guard = false;
   const foesIn = (cells: [number, number][]) => enemiesOf(s, u).filter(g => cells.some(([cx, cz]) => cx === g.x && cz === g.z));
   switch (ab.key) {
-    case 'spin':
-      enemiesOf(s, u).filter(g => adjacent(u.x, u.z, g.x, g.z)).forEach(g => damage(s, g, ab.amount!, '-' + ab.amount, 'ability', ev));
+    case 'spin': {
+      const hit = enemiesOf(s, u).filter(g => adjacent(u.x, u.z, g.x, g.z));
+      hit.forEach(g => damage(s, g, ab.amount!, '-' + ab.amount, 'ability', ev));
+      const downed = hit.find(g => !g.alive);
+      if (downed && !s.winner) momentum(u, downed, ev);
       break;
+    }
     case 'volley':
-      foesIn(area3(s, x, z)).forEach(g => damage(s, g, ab.amount!, '-' + ab.amount, 'ability', ev));
+      foesIn(area3(s, x, z)).forEach(g => { const d = shielded(g, ab.amount!); damage(s, g, d, '-' + d, 'ability', ev); });
       break;
     case 'fireball': {
       const cells = area3(s, x, z);
@@ -387,14 +434,14 @@ export function performAbility(s: GameState, u: Unit, x: number, z: number): Gam
         const t = tileAt(s, x + dx, z + dz);
         if (t && t.blocks.length && BURNABLE.has(t.blocks[t.blocks.length - 1]) && Math.max(Math.abs(dx), Math.abs(dz)) === 2) ignite(t, BALANCE.fire.blockRounds, ev);
       }
-      foesIn(cells).forEach(g => damage(s, g, ab.amount!, '-' + ab.amount, 'ability', ev));
+      foesIn(cells).forEach(g => { const d = shielded(g, ab.amount!); damage(s, g, d, '-' + d, 'ability', ev); });
       break;
     }
     case 'build': {
+      // Barricade: always ends up as a tall wall
       const t = s.tiles[z][x];
-      t.blocks.push('cobble');
       if (t.fire > 0) { t.fire = 0; ev.push({ t: 'fire', x, z, on: false }); }
-      ev.push({ t: 'blockAdded', x, z, mat: 'cobble' });
+      while (t.blocks.length < 2) { t.blocks.push('cobble'); ev.push({ t: 'blockAdded', x, z, mat: 'cobble' }); }
       break;
     }
     case 'heal': {
@@ -408,6 +455,28 @@ export function performAbility(s: GameState, u: Unit, x: number, z: number): Gam
       ev.push({ t: 'summon', id: imp.id, by: u.id });
       break;
     }
+  }
+  return ev;
+}
+
+export function performTurret(s: GameState, u: Unit, x: number, z: number): GameEvent[] {
+  u.ap -= 1;
+  u.guard = false;
+  const t = addUnit(s, 'turret', u.team, [x, z], u.name + "'s Turret");
+  t.owner = u.id;
+  return [{ t: 'ability', id: u.id, key: 'turret', x, z }, { t: 'summon', id: t.id, by: u.id }];
+}
+
+// Each Turret shoots once: the target it is most likely to finish off, else the easiest hit
+function turretsFire(s: GameState, team: Team): GameEvent[] {
+  const ev: GameEvent[] = [];
+  for (const tu of structures(s, team)) {
+    if (s.winner) break;
+    const targets = enemiesOf(s, tu).filter(e => canAttackFrom(s, tu, e, tu.x, tu.z));
+    if (!targets.length) continue;
+    const score = (e: Unit) => { const i = hitInfo(s, tu, e); return (i.dmg >= e.hp ? 100 : 0) + i.chance - e.hp; };
+    const best = targets.reduce((a, b) => (score(b) > score(a) ? b : a));
+    resolveAttack(s, tu, best, 0, ev);
   }
   return ev;
 }
@@ -440,9 +509,12 @@ function startSide(s: GameState, team: Team): GameEvent[] {
 
 export function endPlayerTurn(s: GameState): GameEvent[] {
   if (s.phase !== 'player') return [];
+  const ev = turretsFire(s, 'hero');
+  if (s.winner) return ev;
   s.phase = 'enemy';
   for (const h of living(s, 'hero')) h.ap = 0;
-  return startSide(s, 'gob');
+  ev.push(...startSide(s, 'gob'));
+  return ev;
 }
 
 // Fire burns down wood, spreads to nearby wood and hay, and hurts anyone standing in it
