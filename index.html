@@ -69,6 +69,8 @@ body {
 @keyframes lose { 50% { opacity: 0.25; } }
 @media (prefers-reduced-motion: reduce) { .hp .l, .chip .hearts .l { animation: none; text-decoration: line-through; } }
 .hp.inspect { box-shadow: 0 0 0 2px #b48cff; }
+.hp .ow { color: var(--gold); margin-right: 3px; }
+@media (max-width: 420px) { #actions .btn { font-size: 12px; padding: 8px 4px; } }
 #topBtns { display: flex; gap: 8px; }
 .float {
   position: absolute;
@@ -218,6 +220,7 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
       <div id="actions">
         <button class="btn" id="btnAttack" type="button">Attack</button>
         <button class="btn" id="btnAbility" type="button">Ability</button>
+        <button class="btn" id="btnGuard" type="button">Overwatch<small>Ends turn</small></button>
         <button class="btn go" id="btnConfirm" type="button" disabled>Confirm</button>
       </div>
       <div id="hint">Tap one of your heroes to begin.</div>
@@ -236,7 +239,8 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
       </div>
       <ul>
         <li><strong>Tap a hero</strong>, then a blue tile to plan a route. Tap more tiles to add stops, then tap the end again to walk. Each hero gets 2 actions a turn.</li>
-        <li><strong>Tap a goblin</strong> on a red tile to see your hit chance, then tap again to attack. Attacking ends that hero's turn.</li>
+        <li><strong>Tap a goblin</strong> on a red tile to see your hit chance, then tap again to attack. Faded red goblins can be hit after one move: the hero walks to the yellow tile and attacks in one go. Attacking ends that hero's turn.</li>
+        <li><strong>Overwatch</strong> ends a hero's turn on guard. They shoot the first goblin that moves into their range, with a small aim penalty.</li>
         <li><strong>Walls are cover.</strong> Low walls make you harder to hit, tall walls even more. A miss still grazes for 1.</li>
         <li><strong>Ember's Fireball</strong> blows up blocks. <strong>Digby</strong> builds walls and digs them out. <strong>Sir Bram's Spin Attack</strong> hits every goblin next to him.</li>
         <li><strong>Drag</strong> with one finger to move around the map. Pinch to zoom, and twist with two fingers to turn the camera. <strong>Tap a goblin</strong> any time to see where it can move.</li>
@@ -719,7 +723,7 @@ function spawn(def, team, id) {
 }
 function heartsHTML(u) {
   const keep = Math.max(0, u.hp - (u.preview || 0));
-  let s = '';
+  let s = u.guard ? '<span class="ow" title="On overwatch">👁</span>' : '';
   for (let i = 0; i < u.maxHp; i++) s += i < keep ? '<span class="f">♥</span>' : i < u.hp ? '<span class="l">♥</span>' : '<span class="e">♥</span>';
   return s;
 }
@@ -798,6 +802,23 @@ function attackTargets(u) {
   return goblinsOrHeroes(u).filter(t => canAttackFrom(u, t, u.x, u.z));
 }
 function goblinsOrHeroes(u) { return u.team === 'hero' ? goblins() : heroes(); }
+// Best tile to step to (one move) so the hero can attack t with the second action
+function moveAttackOption(u, t) {
+  if (!u || u.ap < 2) return null;
+  let best = null;
+  moveTiles(u).forEach(n => {
+    if (!canAttackFrom(u, t, n.x, n.z)) return;
+    const info = hitInfo(u, t, n.x, n.z);
+    const score = info.chance - n.d * 0.5;
+    if (!best || score > best.score) best = { node: n, info, score };
+  });
+  return best;
+}
+function moveAttackTargets(u) {
+  if (!u || u.ap < 2) return [];
+  const direct = attackTargets(u);
+  return goblins().filter(g => !direct.includes(g) && moveAttackOption(u, g));
+}
 function digTargets(u) {
   if (u.cls !== 'builder') return [];
   return N4.map(([dx, dz]) => tileAt(u.x + dx, u.z + dz)).filter(t => t && t.h > 0);
@@ -844,9 +865,22 @@ async function moveAlong(u, path) {
       u.group.position.y = Math.sin(Math.PI * k) * 0.22;
     });
     u.x = step.x; u.z = step.z;
+    if (u.team === 'gob') {
+      for (const h of heroes()) {
+        if (!h.guard || !canAttackFrom(h, u, h.x, h.z)) continue;
+        h.guard = false;
+        renderHearts(h);
+        u.group.position.set(u.x, 0, u.z);
+        floatText(headPos(h), 'Overwatch!', '#f2c14e');
+        await wait(0.25);
+        await doAttack(h, u, OVERWATCH_PENALTY);
+        if (!u.alive) return;
+      }
+    }
   }
   u.group.position.set(u.x, 0, u.z);
 }
+const OVERWATCH_PENALTY = 15;
 async function flash(u) {
   u.mats.forEach(m => { m.emissive.setRGB(1, 1, 1); });
   await wait(0.1);
@@ -900,8 +934,9 @@ async function die(u) {
   await tween(0.3, k => { g.scale.setScalar(1 - k); });
   world.remove(g);
 }
-async function doAttack(a, t) {
+async function doAttack(a, t, penalty) {
   const info = hitInfo(a, t);
+  if (penalty) info.chance = Math.max(10, info.chance - penalty);
   face(a, t.x, t.z);
   if (a.C.range === 1) await lunge(a, t);
   else await projectile(new THREE.Vector3(a.x, 0.9, a.z), new THREE.Vector3(t.x, 0.8, t.z), a.cls === 'mage' ? 'bolt' : 'arrow');
@@ -985,7 +1020,7 @@ function banner(text) {
 }
 function startPlayerTurn() {
   S.phase = 'player';
-  heroes().forEach(h => { h.ap = 2; if (h.cd > 0) h.cd--; });
+  heroes().forEach(h => { h.ap = 2; h.guard = false; if (h.cd > 0) h.cd--; });
   S.mode = 'move';
   S.pending = null;
   S.plan = null;
@@ -1053,6 +1088,7 @@ async function goblinAct(g) {
   }
   if (best) {
     if (best.n.d > 0) await moveAlong(g, pathTo(best.n));
+    if (!g.alive || !best.h.alive) return;
     await wait(0.15);
     await doAttack(g, best.h);
     return;
@@ -1109,6 +1145,13 @@ async function confirmPending() {
   if (!p || !u || S.busy) return;
   if (p.kind === 'attack') {
     await run(async () => { u.ap = 0; await doAttack(u, p.target); });
+  } else if (p.kind === 'moveattack') {
+    await run(async () => {
+      u.ap = 0;
+      await moveAlong(u, pathTo(p.node));
+      await wait(0.1);
+      if (p.target.alive) await doAttack(u, p.target);
+    });
   } else if (p.kind === 'dig') {
     await run(async () => { u.ap -= 1; await doDig(u, p.tile); });
   } else if (p.kind === 'ability') {
@@ -1141,9 +1184,13 @@ function handleTap(x, z) {
   if (there && there.team === 'gob') {
     S.plan = null;
     S.inspect = there;
+    const opt = u.ap > 1 && !canAttackFrom(u, there, u.x, u.z) ? moveAttackOption(u, there) : null;
     if (u.ap > 0 && canAttackFrom(u, there, u.x, u.z)) {
       S.mode = 'attack';
       S.pending = { kind: 'attack', target: there, x, z };
+    } else if (opt) {
+      S.mode = 'attack';
+      S.pending = { kind: 'moveattack', target: there, x, z, node: opt.node };
     } else {
       S.mode = 'move';
       S.pending = null;
@@ -1153,6 +1200,10 @@ function handleTap(x, z) {
   if (u.cls === 'builder' && u.ap > 0) {
     const t = digTargets(u).find(t => t.x === x && t.z === z);
     if (t && !S.plan) { S.mode = 'attack'; S.pending = { kind: 'dig', tile: t, x, z }; renderAll(); return; }
+  }
+  if (p && p.kind === 'moveattack') {
+    const n = moveTiles(u).get(key(x, z));
+    if (n && canAttackFrom(u, p.target, n.x, n.z)) { S.pending = Object.assign({}, p, { node: n }); S.inspect = null; renderAll(); return; }
   }
   if (S.mode === 'attack') { S.mode = 'move'; S.pending = null; renderAll(); return; }
   if (u.ap <= 0) return;
@@ -1189,12 +1240,20 @@ function renderHighlights() {
       hl(S.plan.end.x, S.plan.end.z, COL.area, 0.9);
     }
     attackTargets(u).forEach(t => hl(t.x, t.z, COL.attack, 0.6));
+    if (!S.plan) moveAttackTargets(u).forEach(t => hl(t.x, t.z, COL.attack, 0.28));
     digTargets(u).forEach(t => hl(t.x, t.z, COL.dig, 0.55, t.h));
   }
   if (S.mode === 'attack') {
     attackTargets(u).forEach(t => hl(t.x, t.z, COL.attack, 0.6));
+    moveAttackTargets(u).forEach(t => hl(t.x, t.z, COL.attack, 0.28));
     digTargets(u).forEach(t => hl(t.x, t.z, COL.dig, 0.55, t.h));
-    if (S.pending) hl(S.pending.x, S.pending.z, COL.area, 0.85, S.pending.kind === 'dig' ? S.pending.tile.h : 0);
+    const pm = S.pending;
+    if (pm && pm.kind === 'moveattack') {
+      moveTiles(u).forEach(n => { if (canAttackFrom(u, pm.target, n.x, n.z)) hl(n.x, n.z, COL.move, 0.35); });
+      pathTo(pm.node).forEach(n => hl(n.x, n.z, COL.area, 0.45));
+      hl(pm.node.x, pm.node.z, COL.area, 0.9);
+    }
+    if (pm) hl(pm.x, pm.z, COL.area, 0.85, pm.kind === 'dig' ? pm.tile.h : 0);
   }
   if (S.mode === 'ability') {
     const ab = u.C.ability;
@@ -1235,17 +1294,18 @@ function renderPanel() {
     atk.innerHTML = u.C.weapon + '<small>' + (u.C.range === 1 ? 'Melee' : 'Range ' + u.C.range) + '</small>';
     const ab = u.C.ability;
     abl.innerHTML = ab.name + '<small>' + (u.cd > 0 ? 'Ready in ' + u.cd : abilityTargets(u).length === 0 ? (ab.key === 'cleave' ? 'No goblin adjacent' : 'No target') : ab.cd === 0 ? '1 action' : 'Ready') + '</small>';
-    atk.disabled = !myTurn || u.ap <= 0 || (attackTargets(u).length === 0 && digTargets(u).length === 0);
+    atk.disabled = !myTurn || u.ap <= 0 || (attackTargets(u).length === 0 && digTargets(u).length === 0 && moveAttackTargets(u).length === 0);
+    $('btnGuard').disabled = !myTurn || u.ap <= 0;
     abl.disabled = !myTurn || !abilityReady(u);
   } else {
     atk.innerHTML = 'Attack<small>&nbsp;</small>';
     abl.innerHTML = 'Ability<small>&nbsp;</small>';
-    atk.disabled = abl.disabled = true;
+    atk.disabled = abl.disabled = $('btnGuard').disabled = true;
   }
   atk.classList.toggle('on', S.mode === 'attack');
   abl.classList.toggle('on', S.mode === 'ability');
   conf.disabled = !myTurn || (!S.pending && !S.plan);
-  conf.textContent = !S.pending ? (S.plan ? 'Move!' : 'Confirm') : S.pending.kind === 'attack' ? 'Attack!' : S.pending.kind === 'dig' ? 'Dig!' : u && u.C.ability.key === 'build' ? 'Build!' : 'Cast!';
+  conf.textContent = !S.pending ? (S.plan ? 'Move!' : 'Confirm') : S.pending.kind === 'attack' ? 'Attack!' : S.pending.kind === 'moveattack' ? 'Go!' : S.pending.kind === 'dig' ? 'Dig!' : u && u.C.ability.key === 'build' ? 'Build!' : 'Cast!';
 
   $('hint').innerHTML = hintText();
   S.info = null;
@@ -1262,12 +1322,13 @@ function hintText() {
   }
   if (!u) return 'Tap one of your heroes to begin.';
   const p = S.pending;
-  if (p && p.kind === 'attack') {
-    const i = hitInfo(u, p.target), t = p.target;
+  if (p && (p.kind === 'attack' || p.kind === 'moveattack')) {
+    const t = p.target, i = p.kind === 'attack' ? hitInfo(u, t) : hitInfo(u, t, p.node.x, p.node.z);
+    const pre = p.kind === 'moveattack' ? '<strong>Move to the yellow tile, then attack</strong> (uses both actions). Tap another blue tile to attack from there.<br>' : '';
     const afterHit = Math.max(0, t.hp - i.dmg), afterMiss = Math.max(0, t.hp - 1);
     const expected = (i.chance / 100 * i.dmg + (1 - i.chance / 100) * 1).toFixed(1);
     const left = n => n === 0 ? '<strong>defeated</strong>' : n + '♥ left';
-    return '<strong>' + t.name + '</strong> ' + t.hp + '♥ · <span class="pct">' + i.chance + '% to hit</span> · ' + coverWord(i.cover) +
+    return pre + '<strong>' + t.name + '</strong> ' + t.hp + '♥ · <span class="pct">' + i.chance + '% to hit</span> · ' + coverWord(i.cover) +
       '<br>Hit: -' + i.dmg + ', ' + left(afterHit) + ' · Miss: -1, ' + left(afterMiss) + ' · Expected ' + expected + ' damage';
   }
   if (p && p.kind === 'dig') return '<strong>Dig</strong> out the top block here. Costs 1 action. Tap again or press Dig!';
@@ -1284,14 +1345,14 @@ function hintText() {
   if (S.plan) { const left = u.C.move - planSteps(); return '<strong>Route planned</strong>: ' + planSteps() + ' of ' + u.C.move + ' tiles. Tap the yellow end tile again (or Move!) to walk' + (left > 0 ? ', or tap a blue tile to add a stop.' : '.') + ' Tap ' + u.name + ' to clear it.'; }
   if (S.mode === 'ability') return u.C.ability.desc + (u.C.ability.key === 'cleave' ? ' Press Cast! to spin.' : ' Tap a highlighted tile.');
   if (S.mode === 'attack') return 'Tap a goblin on a red tile to aim.' + (u.cls === 'builder' ? ' Tap a brown block to dig it out.' : '');
-  if (u.ap <= 0) return '<strong>' + u.name + '</strong> is done this turn. Pick another hero or end the turn.';
+  if (u.ap <= 0) return '<strong>' + u.name + '</strong> ' + (u.guard ? 'is on Overwatch and will shoot the first goblin that moves into range.' : 'is done this turn.') + ' Pick another hero or end the turn.';
   return '<strong>' + u.name + '</strong> has ' + u.ap + (u.ap === 1 ? ' action' : ' actions') + '. Tap a blue tile to plan a route, or a goblin on a red tile to attack.';
 }
 function previewTargets() {
   const out = new Map();
   const u = S.sel, p = S.pending;
   if (!u || !p || S.phase !== 'player') return out;
-  if (p.kind === 'attack') out.set(p.target, hitInfo(u, p.target).dmg);
+  if (p.kind === 'attack' || p.kind === 'moveattack') out.set(p.target, u.C.dmg);
   if (p.kind === 'ability') {
     const ab = u.C.ability;
     if (ab.key === 'cleave') goblins().filter(g => adjacent(u.x, u.z, g.x, g.z)).forEach(g => out.set(g, 2));
@@ -1331,6 +1392,14 @@ $('btnAbility').addEventListener('click', () => {
   renderAll();
 });
 $('btnConfirm').addEventListener('click', confirmPending);
+$('btnGuard').addEventListener('click', () => {
+  const u = S.sel;
+  if (S.phase !== 'player' || S.busy || !u || u.ap <= 0) return;
+  u.guard = true;
+  u.ap = 0;
+  floatText(headPos(u), 'Overwatch', '#f2c14e');
+  afterHeroAction();
+});
 $('endTurn').addEventListener('click', endPlayerTurn);
 $('centerBtn').addEventListener('click', fitCamera);
 function setDiff(d) {
