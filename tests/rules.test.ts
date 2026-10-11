@@ -158,6 +158,56 @@ describe('overwatch', () => {
   });
 });
 
+describe('overwatch interruptions', () => {
+  it('getting attacked knocks a unit off Overwatch', () => {
+    const s = blank();
+    const a = put(s, 'archer', 'hero', 5, 6, 10);
+    performGuard(s, a);
+    endPlayerTurn(s);
+    const g = put(s, 'grunt', 'gob', 5, 5);
+    performAttack(s, g, a);
+    expect(a.guard).toBe(false);
+  });
+
+  it('an Overwatch hit stops the mover about half the time, a graze never does', () => {
+    let hits = 0, stoppedHits = 0, stoppedMisses = 0;
+    for (let seed = 1; seed <= 400; seed++) {
+      const s = blank({ seed });
+      const a = put(s, 'archer', 'hero', 8, 10);
+      performGuard(s, a);
+      endPlayerTurn(s);
+      const g = put(s, 'troll', 'gob', 8, 2, 50);
+      const ev = performMove(s, g, [{ x: 8, z: 3 }, { x: 8, z: 4 }, { x: 8, z: 5 }]);
+      const shot = ev.find(e => e.t === 'attack');
+      if (!shot || shot.t !== 'attack') continue;
+      const stopped = g.z !== 5;
+      expect(stopped).toBe(ev.some(e => e.t === 'pinned'));
+      if (shot.hit) { hits++; if (stopped) stoppedHits++; } else if (stopped) stoppedMisses++;
+    }
+    expect(hits).toBeGreaterThan(100);
+    expect(stoppedHits / hits).toBeGreaterThan(0.4);
+    expect(stoppedHits / hits).toBeLessThan(0.6);
+    expect(stoppedMisses).toBe(0);
+  });
+
+  it('a hero stopped during move-then-attack does not attack and keeps one action', () => {
+    let checked = 0;
+    for (let seed = 1; seed <= 200 && checked < 5; seed++) {
+      const s = blank({ seed });
+      const g = put(s, 'garcher', 'gob', 5, 6, 50);
+      performGuard(s, g);
+      const target = put(s, 'grunt', 'gob', 9, 6, 50);
+      const k = put(s, 'knight', 'hero', 9, 10);
+      const ev = performMoveAttack(s, k, [{ x: 9, z: 9 }, { x: 9, z: 8 }, { x: 9, z: 7 }], target);
+      if (!ev.some(e => e.t === 'pinned')) continue;
+      checked++;
+      expect(k.ap).toBe(1);
+      expect(target.hp).toBe(50);
+    }
+    expect(checked).toBeGreaterThan(0);
+  });
+});
+
 describe('abilities', () => {
   it('Spin Attack hits every goblin next to the Knight', () => {
     const s = blank();

@@ -39,6 +39,7 @@ export const BALANCE = {
   longRange: { from: 5, penaltyPerTile: 5 },
   chanceLimits: { min: 10, max: 95 },
   overwatchPenalty: 15,
+  overwatchStopChance: 0.5, // chance an Overwatch hit stops the target's move
   sight: { forestHero: 4.5, forestGoblin: 6 },
   fire: { groundRounds: 2, blockRounds: 3, spreadChance: 0.35, burnDamage: 1 },
   well: { heal: 1 },

@@ -55,4 +55,5 @@ export type GameEvent =
   | { t: 'fire'; x: number; z: number; on: boolean }
   | { t: 'ability'; id: string; key: string; x: number; z: number }
   | { t: 'summon'; id: string; by: string }
-  | { t: 'guard'; id: string };
+  | { t: 'guard'; id: string }
+  | { t: 'pinned'; id: string };

@@ -24,7 +24,7 @@ playtest simulator all use exactly the same rules as the real game.
 - Hit chance = aim, minus 25 for half cover or 45 for full cover, plus 10 for a ranged shot at an
   uncovered target, minus 5 per tile beyond 5, limited to 10–95%. A miss grazes for 1.
 - Tall walls block line of sight, except walls right next to the shooter or the target.
-- Overwatch shoots the first enemy that moves in range, at -15 aim.
+- Overwatch shoots the first enemy that moves in range, at -15 aim. A hit (not a graze) has a 50% chance to stop the mover where it stands. Taking an attack or ability hit ends a unit's Overwatch.
 - Fire burns 1 per round for anyone standing in it, burns wood/hay/leaves away and can spread.
 - Standing next to a well heals 1 at the start of your turn.
 - Dark Forest fog: heroes see 4.5 tiles, goblins 6.

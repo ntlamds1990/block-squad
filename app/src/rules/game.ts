@@ -256,6 +256,8 @@ function damage(s: GameState, u: Unit, n: number, label: string, cause: 'hit' | 
   if (!u.alive) return;
   u.hp = Math.max(0, u.hp - n);
   ev.push({ t: 'damage', id: u.id, amount: n, label, cause });
+  // Getting hit by an attack or ability knocks a unit off Overwatch
+  if (cause !== 'fire') u.guard = false;
   if (u.hp <= 0) {
     u.alive = false;
     u.guard = false;
@@ -271,26 +273,39 @@ function heal(u: Unit, n: number, cause: 'ability' | 'well', ev: GameEvent[]) {
   ev.push({ t: 'heal', id: u.id, amount, cause });
 }
 
-function resolveAttack(s: GameState, a: Unit, t: Unit, penalty: number, ev: GameEvent[], overwatch = false) {
+function resolveAttack(s: GameState, a: Unit, t: Unit, penalty: number, ev: GameEvent[], overwatch = false): boolean {
   const info = hitInfo(s, a, t);
   const chance = clampChance(info.chance - penalty);
   const hit = next(s.rng) * 100 < chance;
   ev.push({ t: 'attack', id: a.id, target: t.id, kind: attackKind(a), hit, chance, overwatch });
   if (hit) damage(s, t, info.dmg, '-' + info.dmg, 'hit', ev);
   else damage(s, t, BALANCE.graze, 'Graze -' + BALANCE.graze, 'graze', ev);
+  return hit;
 }
 
-function overwatchCheck(s: GameState, mover: Unit, ev: GameEvent[]) {
+// Returns true when an Overwatch hit stops the mover in its tracks
+function overwatchCheck(s: GameState, mover: Unit, ev: GameEvent[]): boolean {
+  let stopped = false;
   for (const h of enemiesOf(s, mover)) {
     if (!h.guard || !canAttackFrom(s, h, mover, h.x, h.z)) continue;
     h.guard = false;
-    resolveAttack(s, h, mover, BALANCE.overwatchPenalty, ev, true);
-    if (!mover.alive) return;
+    const hit = resolveAttack(s, h, mover, BALANCE.overwatchPenalty, ev, true);
+    if (!mover.alive) return true;
+    if (hit && !stopped && next(s.rng) < BALANCE.overwatchStopChance) {
+      stopped = true;
+      ev.push({ t: 'pinned', id: mover.id });
+    }
   }
+  return stopped;
 }
 
 export function performMove(s: GameState, u: Unit, path: { x: number; z: number }[]): GameEvent[] {
+  return moveAlong(s, u, path).ev;
+}
+
+function moveAlong(s: GameState, u: Unit, path: { x: number; z: number }[]): { ev: GameEvent[]; stopped: boolean } {
   const ev: GameEvent[] = [];
+  let stopped = false;
   u.ap -= 1;
   u.guard = false;
   for (const st of path) {
@@ -300,10 +315,10 @@ export function performMove(s: GameState, u: Unit, path: { x: number; z: number 
     ev.push({ t: 'step', id: u.id, x: st.x, z: st.z });
     if (t.fire > 0) damage(s, u, BALANCE.fire.burnDamage, 'Burn -' + BALANCE.fire.burnDamage, 'fire', ev);
     if (!u.alive || s.winner) break;
-    overwatchCheck(s, u, ev);
-    if (!u.alive || s.winner) break;
+    stopped = overwatchCheck(s, u, ev);
+    if (stopped || !u.alive || s.winner) break;
   }
-  return ev;
+  return { ev, stopped };
 }
 
 export function performAttack(s: GameState, a: Unit, t: Unit): GameEvent[] {
@@ -315,8 +330,9 @@ export function performAttack(s: GameState, a: Unit, t: Unit): GameEvent[] {
 }
 
 export function performMoveAttack(s: GameState, a: Unit, path: { x: number; z: number }[], t: Unit): GameEvent[] {
-  const ev = performMove(s, a, path);
-  if (a.alive && t.alive && !s.winner && canAttackFrom(s, a, t, a.x, a.z)) {
+  const { ev, stopped } = moveAlong(s, a, path);
+  // Stopped by Overwatch: the attack doesn't happen, and the hero keeps their last action
+  if (!stopped && a.alive && t.alive && !s.winner && canAttackFrom(s, a, t, a.x, a.z)) {
     a.ap = 0;
     resolveAttack(s, a, t, 0, ev);
   }

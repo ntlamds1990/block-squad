@@ -464,6 +464,7 @@ export class View {
         const v = this.units.get(e.id);
         if (!v) return;
         v.hp = Math.max(0, v.hp - e.amount);
+        if (e.cause !== 'fire') v.guard = false;
         this.renderHearts(v);
         const color = e.cause === 'graze' ? '#cfd6ea' : e.cause === 'fire' ? '#ff8a3d' : e.cause === 'ability' ? '#ffd23a' : '#ffffff';
         if (!v.hidden) this.floatText(this.headPos(v), e.label, color);
@@ -570,6 +571,13 @@ export class View {
         this.updateFog();
         await this.tween(0.3, k => { v.group.scale.setScalar(Math.max(0.01, k)); });
         v.group.scale.setScalar(1);
+        return;
+      }
+      case 'pinned': {
+        const v = this.units.get(e.id);
+        if (!v || v.hidden) return;
+        this.floatText(new THREE.Vector3(v.group.position.x, 2.2, v.group.position.z), 'Stopped!', '#ff8a3d');
+        await this.wait(0.3);
         return;
       }
       case 'guard': {
