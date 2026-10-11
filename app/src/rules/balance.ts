@@ -74,6 +74,13 @@ export const BALANCE = {
   freeze: 0.5,
   tnt: { damage: 3 },
   snare: { damage: 2 },
+  // Goblins that keep up: a stronger squad (levels, promotions, gear) faces extra goblins
+  adaptive: {
+    perLevel: 1, promoted: 1, gear: { common: 1, rare: 1.5, epic: 2.5 },
+    pointsPerGoblin: 3.5,   // squad power points for each extra goblin
+    maxExtra: 9,
+    extras: ['grunt', 'garcher', 'troll', 'grunt', 'shaman', 'garcher', 'troll', 'grunt', 'garcher'] as GoblinClass[]
+  },
   difficulty: {
     easy: { goblinHpBonus: 0, goblinAim: 0, aiNoise: 3, roster: ['grunt', 'grunt', 'grunt', 'garcher', 'garcher', 'shaman'] as GoblinClass[] },
     normal: { goblinHpBonus: 0, goblinAim: -15, aiNoise: 1.4, roster: ['grunt', 'grunt', 'grunt', 'grunt', 'garcher', 'garcher', 'shaman', 'troll'] as GoblinClass[] },

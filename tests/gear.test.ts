@@ -175,3 +175,18 @@ describe('Forge and stash', () => {
     expect(c.stash).toHaveLength(LOOT.stashMax);
   });
 });
+
+describe('goblins that keep up', () => {
+  it('a fresh squad meets the normal horde, a strong one meets extra goblins', async () => {
+    const { extraGoblins, goblinRoster, squadPower } = await import('../app/src/rules/game');
+    const fresh = [{ cls: 'knight' as const, name: 'K' }, { cls: 'archer' as const, name: 'A' }];
+    expect(squadPower(fresh)).toBe(0);
+    expect(goblinRoster('normal', fresh)).toHaveLength(8);
+    const strong = fresh.map(m => ({ ...m, level: 3, path: m.cls === 'knight' ? 'paladin' as const : 'ranger' as const, gear: ['leather' as const] }));
+    expect(squadPower(strong)).toBe(2 * (2 + 1 + 1));
+    expect(extraGoblins(strong)).toBe(2);
+    expect(goblinRoster('normal', strong)).toHaveLength(10);
+    const s = createGame({ seed: 5, diff: 'normal', theme: 'village', squad: strong });
+    expect(living(s, 'gob')).toHaveLength(10);
+  });
+});

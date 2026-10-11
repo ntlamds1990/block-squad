@@ -7,7 +7,7 @@ import {
   abilityOf, abilityReady, abilityTargets, area3, attackTargets, buildCells, canAttackFrom, canSee, cdOf, classLabel, createGame, def,
   digTargets, endEnemyTurn, endPlayerTurn, hAt, hitInfo, iceWallCells, key, living, moveAttackOption, moveAttackTargets, moveTiles, near8,
   pathTo, moveAttackTiles, performAbility, performAttack, performDig, performGuard, performMove, performMoveAttack, rangeFrom, reach, reachFrom,
-  tileAt, unitAt, unitById, heroMaxHp, type PathNode, type Slot, type SquadMember
+  tileAt, unitAt, unitById, heroMaxHp, extraGoblins, type PathNode, type Slot, type SquadMember
 } from './rules/game';
 import {
   applyBattle, canPromote, ensureSquad, heroLabel, levelOf, newCampaign, nextLevelXp, parseCampaign, promote, recruit,
@@ -1018,8 +1018,18 @@ function showSetup(mode: 'campaign' | 'practice') {
   showOnly('setup');
 }
 
+const practiceSquad = () => squad.map(m => ({ ...m, level: m.path ? 3 : 1 }));
+const DIFF_NOTE: Record<Difficulty, string> = { easy: '', normal: ', with a Troll', hard: ', more archers' };
 function renderSetup() {
-  document.querySelectorAll<HTMLButtonElement>('[data-diff]').forEach(b => b.classList.toggle('on', b.dataset.diff === setup.diff));
+  const extra = extraGoblins(setupMode === 'campaign' ? squadMembers(camp) : practiceSquad());
+  document.querySelectorAll<HTMLButtonElement>('[data-diff]').forEach(b => {
+    const d = b.dataset.diff as Difficulty;
+    b.classList.toggle('on', d === setup.diff);
+    b.innerHTML = `${cap(d)}<small>${BALANCE.difficulty[d].roster.length + extra} goblins${extra ? '' : DIFF_NOTE[d]}</small>`;
+  });
+  $('adaptNote').textContent = extra
+    ? `Your squad is strong, so ${extra} extra ${extra === 1 ? 'goblin joins' : 'goblins join'} the horde. Levels, promotions and gear all count.`
+    : '';
   document.querySelectorAll<HTMLButtonElement>('[data-theme]').forEach(b => b.classList.toggle('on', b.dataset.theme === setup.theme));
   const box = $('slots');
   box.innerHTML = '';
@@ -1102,7 +1112,7 @@ $('startBtn').addEventListener('click', () => {
   }
   squad = squad.map(m => ({ cls: m.cls, name: m.name.trim().slice(0, 14) || randomName(m.cls, []), path: m.path }));
   try { localStorage.setItem(SQUAD_KEY, JSON.stringify(squad)); } catch { /* ignore */ }
-  begin(createGame({ seed, diff: setup.diff, theme, squad: squad.map(m => ({ ...m, level: m.path ? 3 : 1 })), mode: 'practice' }));
+  begin(createGame({ seed, diff: setup.diff, theme, squad: practiceSquad(), mode: 'practice' }));
 });
 $('againBtn').addEventListener('click', () => { if (s.mode === 'campaign') showBarracks(); else showStart(); });
 

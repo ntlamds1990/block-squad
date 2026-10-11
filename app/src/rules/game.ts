@@ -1,11 +1,11 @@
 // Pure game rules: no graphics, no DOM. Every change to the game state goes through these functions,
 // which return a list of events for the screen to animate. The CPU, the tests and (later) two-phone
 // play all use the same rules.
-import { BALANCE, CLASSES, PATHS, PROGRESS, type AbilityDef, type ClassDef, type ClassId, type Difficulty, type HeroClass, type PathId, type Team } from './balance';
+import { BALANCE, CLASSES, PATHS, PROGRESS, type AbilityDef, type ClassDef, type ClassId, type Difficulty, type GoblinClass, type HeroClass, type PathId, type Team } from './balance';
 import { BURNABLE, type AttackKind, type GameEvent, type GameState, type Theme, type Tile, type Unit } from './types';
 import { makeRng, next, shuffle } from './rng';
 import { generateLayout, layoutToTiles } from './map';
-import { gearMod, withGear, type ItemId } from './items';
+import { ITEMS, gearMod, withGear, type ItemId } from './items';
 
 export const SIZE = 16;
 export const N4: ReadonlyArray<readonly [number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1]];
@@ -23,9 +23,25 @@ export function createGame(o: NewGameOptions): GameState {
   const heroSpots = shuffle(rng, openSpots(s, SIZE - 3, SIZE - 1));
   o.squad.forEach((m, i) => addUnit(s, m.cls, 'hero', heroSpots[i], m.name, undefined, { path: m.path, level: m.level, heroId: m.heroId, gear: m.gear }));
   const gobSpots = shuffle(rng, openSpots(s, 0, 2));
-  BALANCE.difficulty[o.diff].roster.forEach((c, i) => addUnit(s, c, 'gob', gobSpots[i]));
+  goblinRoster(o.diff, o.squad).forEach((c, i) => addUnit(s, c, 'gob', gobSpots[i]));
   startSide(s, 'hero');
   return s;
+}
+
+// How strong a squad is beyond fresh level-1 heroes with no gear (0 for a new squad)
+export function squadPower(squad: readonly SquadMember[]): number {
+  const A = BALANCE.adaptive;
+  let p = 0;
+  for (const m of squad) {
+    p += ((m.level ?? 1) - 1) * A.perLevel + (m.path ? A.promoted : 0);
+    for (const id of m.gear ?? []) p += A.gear[ITEMS[id].rarity];
+  }
+  return p;
+}
+export const extraGoblins = (squad: readonly SquadMember[]) =>
+  Math.min(BALANCE.adaptive.maxExtra, Math.floor(squadPower(squad) / BALANCE.adaptive.pointsPerGoblin));
+export function goblinRoster(diff: Difficulty, squad: readonly SquadMember[]): GoblinClass[] {
+  return [...BALANCE.difficulty[diff].roster, ...BALANCE.adaptive.extras.slice(0, extraGoblins(squad))];
 }
 
 function openSpots(s: GameState, z0: number, z1: number): [number, number][] {
