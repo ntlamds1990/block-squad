@@ -5,12 +5,13 @@ import { BALANCE, CLASSES, PATHS, PROGRESS, type AbilityDef, type ClassDef, type
 import { BURNABLE, type AttackKind, type GameEvent, type GameState, type Theme, type Tile, type Unit } from './types';
 import { makeRng, next, shuffle } from './rng';
 import { generateLayout, layoutToTiles } from './map';
+import { gearMod, withGear, type ItemId } from './items';
 
 export const SIZE = 16;
 export const N4: ReadonlyArray<readonly [number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 export const key = (x: number, z: number) => x + ',' + z;
 
-export interface SquadMember { cls: HeroClass; name: string; path?: PathId; level?: number; heroId?: string }
+export interface SquadMember { cls: HeroClass; name: string; path?: PathId; level?: number; heroId?: string; gear?: ItemId[] }
 export interface NewGameOptions { diff: Difficulty; theme: Theme; squad: SquadMember[]; seed: number; mode?: 'campaign' | 'practice' }
 
 /* ---------- Setup ---------- */
@@ -20,7 +21,7 @@ export function createGame(o: NewGameOptions): GameState {
   const tiles = layoutToTiles(generateLayout(rng, SIZE, o.theme));
   const s: GameState = { size: SIZE, theme: o.theme, diff: o.diff, tiles, units: [], turn: 1, phase: 'player', winner: null, rng, nextId: 1, mode: o.mode, battleId: o.seed };
   const heroSpots = shuffle(rng, openSpots(s, SIZE - 3, SIZE - 1));
-  o.squad.forEach((m, i) => addUnit(s, m.cls, 'hero', heroSpots[i], m.name, undefined, { path: m.path, level: m.level, heroId: m.heroId }));
+  o.squad.forEach((m, i) => addUnit(s, m.cls, 'hero', heroSpots[i], m.name, undefined, { path: m.path, level: m.level, heroId: m.heroId, gear: m.gear }));
   const gobSpots = shuffle(rng, openSpots(s, 0, 2));
   BALANCE.difficulty[o.diff].roster.forEach((c, i) => addUnit(s, c, 'gob', gobSpots[i]));
   startSide(s, 'hero');
@@ -33,12 +34,12 @@ function openSpots(s: GameState, z0: number, z1: number): [number, number][] {
   return out;
 }
 
-export interface HeroExtras { path?: PathId; level?: number; heroId?: string }
+export interface HeroExtras { path?: PathId; level?: number; heroId?: string; gear?: ItemId[] }
 
 // Hearts for a hero: the class (or its promotion) plus any bonus from levelling up
-export function heroMaxHp(c: ClassId, path?: PathId, level = 1): number {
+export function heroMaxHp(c: ClassId, path?: PathId, level = 1, gear: readonly ItemId[] = []): number {
   const base = path ? PATH_DEFS[path].hp : CLASSES[c].hp;
-  let bonus = 0;
+  let bonus = gearMod(gear).hp;
   for (let l = 2; l <= level; l++) bonus += PROGRESS.levelHp[l] ?? 0;
   return base + bonus;
 }
@@ -46,7 +47,7 @@ export function heroMaxHp(c: ClassId, path?: PathId, level = 1): number {
 export function addUnit(s: GameState, c: ClassId, team: Team, at: [number, number], name?: string, hp?: number, x?: HeroExtras): Unit {
   const C = CLASSES[c];
   const path = x?.path && PATHS[x.path]?.cls === c ? x.path : undefined;
-  const maxHp = hp ?? (team === 'gob' ? C.hp + BALANCE.difficulty[s.diff].goblinHpBonus : heroMaxHp(c, path, x?.level ?? 1));
+  const maxHp = hp ?? (team === 'gob' ? C.hp + BALANCE.difficulty[s.diff].goblinHpBonus : heroMaxHp(c, path, x?.level ?? 1, team === 'hero' ? x?.gear ?? [] : []));
   const u: Unit = {
     id: (team === 'hero' ? 'h' : 'g') + s.nextId++, team, cls: c, name: name ?? C.label,
     x: at[0], z: at[1], hp: maxHp, maxHp, ap: 0, cd: 0, cd2: 0, alive: true, guard: false, summons: 0, kills: 0
@@ -54,6 +55,12 @@ export function addUnit(s: GameState, c: ClassId, team: Team, at: [number, numbe
   if (path) u.path = path;
   if (x?.level) u.level = x.level;
   if (x?.heroId) u.heroId = x.heroId;
+  if (team === 'hero' && x?.gear?.length) {
+    u.gear = [...x.gear];
+    const m = gearMod(u.gear);
+    if (m.secondWind) u.secondWind = true;
+    if (m.potion) u.potion = m.potion;
+  }
   s.units.push(u);
   return u;
 }
@@ -74,7 +81,16 @@ export const enemiesOf = (s: GameState, u: Unit) => s.units.filter(e => e.alive 
 export const PATH_DEFS = Object.fromEntries(
   (Object.keys(PATHS) as PathId[]).map(p => [p, { ...CLASSES[PATHS[p].cls], ...PATHS[p].mod, label: PATHS[p].label } as ClassDef])
 ) as Record<PathId, ClassDef>;
-export const def = (u: Unit): ClassDef => (u.path ? PATH_DEFS[u.path] : CLASSES[u.cls]);
+const baseDef = (u: Unit): ClassDef => (u.path ? PATH_DEFS[u.path] : CLASSES[u.cls]);
+// A hero's stats with their gear on, worked out once per class, path and gear combination
+const GEAR_DEFS = new Map<string, ClassDef>();
+export const def = (u: Unit): ClassDef => {
+  if (!u.gear?.length) return baseDef(u);
+  const k = (u.path ?? u.cls) + ':' + u.gear.join(',');
+  let d = GEAR_DEFS.get(k);
+  if (!d) GEAR_DEFS.set(k, (d = withGear(baseDef(u), u.gear)));
+  return d;
+};
 export const classLabel = (u: Unit) => def(u).label;
 export type Slot = 1 | 2;
 export const abilityOf = (u: Unit, slot: Slot = 1): AbilityDef | undefined => (slot === 2 ? def(u).extra : def(u).ability);
@@ -409,6 +425,20 @@ function damage(s: GameState, u: Unit, n: number, label: string, cause: Cause, e
   ev.push({ t: 'damage', id: u.id, amount: n, label, cause });
   // Getting hit by an attack or ability knocks a unit off Overwatch
   if (cause !== 'fire') u.guard = false;
+  // Ring of Second Wind: once per battle, stay up with 1 heart
+  if (u.hp <= 0 && u.secondWind) {
+    u.secondWind = false;
+    u.hp = 1;
+    ev.push({ t: 'status', id: u.id, status: 'secondWind' });
+  }
+  // A Healing Potion is drunk by itself at 1 heart
+  if (u.hp === 1 && u.potion) {
+    const amount = u.potion;
+    u.potion = undefined;
+    u.potionUsed = true;
+    ev.push({ t: 'status', id: u.id, status: 'potion' });
+    heal(u, amount, 'ability', ev);
+  }
   if (u.hp <= 0) {
     u.alive = false;
     u.guard = false;

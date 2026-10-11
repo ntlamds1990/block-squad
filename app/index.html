@@ -70,9 +70,10 @@
         <div class="heroes" id="heroList"></div>
         <div class="classInfo" id="heroInfo"></div>
       </div>
-      <div class="row2">
+      <div class="row3">
         <button class="btn" id="recruitBtn" type="button">Recruit<small>25 gold</small></button>
-        <button class="btn" id="fallenBtn" type="button">Fallen heroes<small>&nbsp;</small></button>
+        <button class="btn" id="forgeBtn" type="button">Forge<small>Buy gear</small></button>
+        <button class="btn" id="fallenBtn" type="button">Fallen<small>&nbsp;</small></button>
       </div>
       <div class="row2">
         <button class="btn" id="barracksBack" type="button">Back</button>
@@ -104,6 +105,31 @@
         <button class="btn" id="promoteCancel" type="button">Later</button>
         <button class="btn primary" id="promoteOk" type="button" disabled>Promote</button>
       </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="gear" hidden>
+    <div class="card wide">
+      <h2 id="gearTitle">Gear</h2>
+      <p class="muted" id="gearStats"></p>
+      <div class="items" id="gearSlots"></div>
+      <label class="lbl" id="gearStashLbl">From your stash</label>
+      <div class="items" id="gearStash"></div>
+      <p class="muted" id="gearNote" aria-live="polite"></p>
+      <button class="btn" id="gearBack" type="button">Back to the Barracks</button>
+    </div>
+  </div>
+
+  <div class="overlay" id="forge" hidden>
+    <div class="card wide">
+      <h2>Forge</h2>
+      <div class="purse"><span class="coins" id="forgeGold">0</span><span class="muted">Chests from wins hold Rare and Epic gear</span></div>
+      <label class="lbl">For sale</label>
+      <div class="items" id="forgeItems"></div>
+      <label class="lbl" id="stashLbl">Your stash</label>
+      <div class="items" id="stashItems"></div>
+      <p class="muted" id="forgeNote" aria-live="polite"></p>
+      <button class="btn" id="forgeBack" type="button">Back to the Barracks</button>
     </div>
   </div>
 

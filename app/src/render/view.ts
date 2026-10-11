@@ -5,7 +5,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { BALANCE, CLASSES, type ClassId } from '../rules/balance';
 import type { GameEvent, GameState, Mat, Theme, Unit } from '../rules/types';
 import { MAT, BLOCK_COLOR } from './textures';
-import { buildModel } from './models';
+import { buildModel, dressModel } from './models';
 import { play, type Sfx } from '../ui/audio';
 
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -309,6 +309,7 @@ export class View {
   private addUnit(u: Unit): UnitView {
     const small = u.cls === 'grunt' && u.maxHp <= BALANCE.shaman.summonHp;
     const m = buildModel(u.cls, u.team, small);
+    if (u.gear?.length) dressModel(m, u.gear);
     m.group.position.set(u.x, this.baseY(u.x, u.z), u.z);
     m.group.rotation.y = u.team === 'hero' ? Math.PI : 0;
     m.group.userData.unitId = u.id;
@@ -741,7 +742,7 @@ export class View {
         v.status = u ? statusOf(u) : '';
         this.renderHearts(v);
         if (v.hidden) return;
-        const text = { frozen: ['Frozen!', '#9fdcff'], thaw: ['Frozen: skips a turn', '#9fdcff'], rooted: ['Rooted!', '#7cc35a'], blessed: ['Blessed!', '#fff3b0'] }[e.status];
+        const text = { frozen: ['Frozen!', '#9fdcff'], thaw: ['Frozen: skips a turn', '#9fdcff'], rooted: ['Rooted!', '#7cc35a'], blessed: ['Blessed!', '#fff3b0'], secondWind: ['Second Wind!', '#ffd23a'], potion: ['Potion!', '#ff7ab0'] }[e.status];
         this.floatText(new THREE.Vector3(v.group.position.x, 2.2 + v.group.position.y, v.group.position.z), text[0], text[1]);
         if (e.status === 'frozen') this.burst(new THREE.Vector3(v.x, 0.8, v.z), '#bfe6fa', 10, 0.1, 2);
         await this.wait(0.3);

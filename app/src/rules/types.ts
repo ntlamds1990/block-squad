@@ -1,3 +1,4 @@
+import type { ItemId } from './items';
 import type { ClassId, Difficulty, PathId, Team } from './balance';
 import type { Rng } from './rng';
 
@@ -39,6 +40,10 @@ export interface Unit {
   frozen?: boolean;  // skips its next turn
   rooted?: boolean;  // can't move this turn
   blessed?: boolean; // next attack gets a bonus to hit
+  gear?: ItemId[];    // items the hero carries (campaign and practice)
+  secondWind?: boolean; // Ring of Second Wind not used yet this battle
+  potion?: number;      // Healing Potion not drunk yet: hearts it heals
+  potionUsed?: boolean;
 }
 
 export interface GameState {
@@ -72,7 +77,7 @@ export type GameEvent =
   | { t: 'guard'; id: string }
   | { t: 'pinned'; id: string }
   | { t: 'momentum'; id: string }
-  | { t: 'status'; id: string; status: 'frozen' | 'thaw' | 'rooted' | 'blessed' }
+  | { t: 'status'; id: string; status: 'frozen' | 'thaw' | 'rooted' | 'blessed' | 'secondWind' | 'potion' }
   | { t: 'explode'; x: number; z: number }
   | { t: 'trap'; x: number; z: number; on: boolean; sprung?: string }
   | { t: 'tower'; x: number; z: number; on: boolean };

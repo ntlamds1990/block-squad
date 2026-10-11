@@ -3,6 +3,7 @@
 import { CLASSES, HERO_CLASSES, NAME_POOL, PATHS, PATHS_OF, PROGRESS, type HeroClass, type PathId } from './balance';
 import { living, type SquadMember } from './game';
 import type { GameState, Theme } from './types';
+import { FORGE, ITEMS, LOOT, fits, isItem, rollChest, sellPrice, type GearSlot, type ItemId } from './items';
 
 export interface HeroRecord {
   id: string;
@@ -12,6 +13,7 @@ export interface HeroRecord {
   xp: number;
   kills: number;
   battles: number;
+  gear?: Partial<Record<GearSlot, ItemId>>;
 }
 
 export interface FallenRecord {
@@ -34,6 +36,7 @@ export interface Campaign {
   wins: number;
   nextId: number;
   squad: string[];        // hero ids picked for the next battle
+  stash: ItemId[];        // items nobody is carrying
   lastBattle?: number;    // battleId of the last result applied (so a result is never counted twice)
 }
 
@@ -54,6 +57,11 @@ export interface BattleReport {
   goblins: number;       // goblins defeated
   heroes: HeroReport[];
   freeRecruits: string[];
+  loot?: ItemId;         // the chest from a win
+  lootSold?: number;     // gold, when the stash was full and the chest's item was sold
+  gearBack: ItemId[];    // a fallen hero's gear, carried home after a win
+  gearLost: ItemId[];    // a fallen hero's gear, lost in a defeat
+  potions: string[];     // heroes who drank their potion
 }
 
 export function levelOf(xp: number): number {
@@ -85,7 +93,7 @@ function addHero(c: Campaign, cls: HeroClass, name: string): HeroRecord {
 
 // A new Barracks: 6 heroes, starting with the squad the player already built (if any)
 export function newCampaign(start: { cls: HeroClass; name: string }[] = [], rand: () => number = Math.random): Campaign {
-  const c: Campaign = { v: 1, gold: PROGRESS.gold.start, heroes: [], fallen: [], battles: 0, wins: 0, nextId: 1, squad: [] };
+  const c: Campaign = { v: 1, gold: PROGRESS.gold.start, heroes: [], fallen: [], battles: 0, wins: 0, nextId: 1, squad: [], stash: [] };
   for (const m of start.slice(0, PROGRESS.startRoster)) addHero(c, m.cls, m.name.trim().slice(0, 14) || pickName(m.cls, [], rand));
   // Fill up with the classes not picked yet, then Knights and Archers
   const order: HeroClass[] = [...HERO_CLASSES.filter(k => !c.heroes.some(h => h.cls === k)), 'knight', 'archer', 'mage', 'cleric'];
@@ -139,7 +147,7 @@ export function toggleSquad(c: Campaign, heroId: string) {
 
 export function squadMembers(c: Campaign): SquadMember[] {
   return c.squad.map(id => c.heroes.find(h => h.id === id)).filter((h): h is HeroRecord => !!h)
-    .map(h => ({ cls: h.cls, name: h.name, path: h.path, level: levelOf(h.xp), heroId: h.id }));
+    .map(h => ({ cls: h.cls, name: h.name, path: h.path, level: levelOf(h.xp), heroId: h.id, gear: gearList(h) }));
 }
 
 export const placeName = (t: Theme) => (t === 'forest' ? 'the Dark Forest' : 'the village');
@@ -155,6 +163,7 @@ export function applyBattle(c: Campaign, s: GameState, rand: () => number = Math
   c.battles++;
   if (won) c.wins++;
   const heroes: HeroReport[] = [];
+  const gearBack: ItemId[] = [], gearLost: ItemId[] = [], potions: string[] = [];
   for (const u of s.units) {
     if (u.team !== 'hero' || !u.heroId) continue;
     const h = c.heroes.find(x => x.id === u.heroId);
@@ -163,7 +172,12 @@ export function applyBattle(c: Campaign, s: GameState, rand: () => number = Math
     const before = levelOf(h.xp);
     h.battles++;
     h.kills += kills;
+    if (u.potionUsed && h.gear?.charm && ITEMS[h.gear.charm].mod.potion) {
+      delete h.gear.charm;
+      potions.push(h.name);
+    }
     if (!u.alive) {
+      for (const id of gearList(h)) (won ? gearBack : gearLost).push(id);
       c.heroes = c.heroes.filter(x => x !== h);
       c.squad = c.squad.filter(id => id !== h.id);
       c.fallen.push({ name: h.name, cls: h.cls, path: h.path, level: before, kills: h.kills, battles: h.battles, place: placeName(s.theme), battle: c.battles });
@@ -174,8 +188,15 @@ export function applyBattle(c: Campaign, s: GameState, rand: () => number = Math
     h.xp += xp;
     heroes.push({ id: h.id, name: h.name, xp, levelBefore: before, levelAfter: levelOf(h.xp), kills, fell: false, canPromote: canPromote(h) });
   }
+  c.stash.push(...gearBack);
+  let loot: ItemId | undefined, lootSold: number | undefined;
+  if (won) {
+    loot = rollChest(s.diff, rand, c.heroes.map(h => h.cls));
+    if (c.stash.length >= LOOT.stashMax) { lootSold = sellPrice(loot); c.gold += lootSold; }
+    else c.stash.push(loot);
+  }
   const freeRecruits = ensureSquad(c, rand);
-  return { won, gold, goblins, heroes, freeRecruits };
+  return { won, gold, goblins, heroes, freeRecruits, loot, lootSold, gearBack, gearLost, potions };
 }
 
 export function parseCampaign(json: string | null): Campaign | null {
@@ -191,10 +212,64 @@ export function parseCampaign(json: string | null): Campaign | null {
       if (h.path && PATHS[h.path]?.cls !== h.cls) delete h.path;
     }
     if (!Array.isArray(c.squad)) c.squad = [];
+    c.stash = Array.isArray(c.stash) ? c.stash.filter(isItem) : [];
+    for (const h of c.heroes as HeroRecord[]) {
+      if (!h.gear || typeof h.gear !== 'object') { delete h.gear; continue; }
+      for (const slot of SLOTS) {
+        const id = h.gear[slot];
+        if (id !== undefined && (!isItem(id) || ITEMS[id].slot !== slot || !fits(id, h.cls))) delete h.gear[slot];
+      }
+    }
     return c as Campaign;
   } catch {
     return null;
   }
+}
+
+/* ---------- Gear ---------- */
+
+export const SLOTS: GearSlot[] = ['weapon', 'armour', 'charm'];
+export const gearList = (h: HeroRecord): ItemId[] => SLOTS.map(sl => h.gear?.[sl]).filter((x): x is ItemId => !!x);
+
+export function buy(c: Campaign, id: ItemId): string | null {
+  if (!FORGE.includes(id)) return 'The Forge does not sell that.';
+  if (c.gold < ITEMS[id].price) return `You need ${ITEMS[id].price} gold.`;
+  if (c.stash.length >= LOOT.stashMax) return `Your stash is full (${LOOT.stashMax} items). Sell something first.`;
+  c.gold -= ITEMS[id].price;
+  c.stash.push(id);
+  return null;
+}
+
+export function sell(c: Campaign, stashIndex: number): number {
+  const id = c.stash[stashIndex];
+  if (!id) return 0;
+  c.stash.splice(stashIndex, 1);
+  const g = sellPrice(id);
+  c.gold += g;
+  return g;
+}
+
+// Put a stash item on a hero; whatever was in that slot goes back to the stash
+export function equip(c: Campaign, heroId: string, stashIndex: number): string | null {
+  const h = c.heroes.find(x => x.id === heroId);
+  const id = c.stash[stashIndex];
+  if (!h || !id) return 'Nothing to equip.';
+  if (!fits(id, h.cls)) return `${ITEMS[id].name} is for ${ITEMS[id].cls}s only.`;
+  const slot = ITEMS[id].slot;
+  c.stash.splice(stashIndex, 1);
+  const old = h.gear?.[slot];
+  if (old) c.stash.push(old);
+  h.gear = { ...h.gear, [slot]: id };
+  return null;
+}
+
+export function unequip(c: Campaign, heroId: string, slot: GearSlot): boolean {
+  const h = c.heroes.find(x => x.id === heroId);
+  const id = h?.gear?.[slot];
+  if (!h || !id) return false;
+  delete h.gear![slot];
+  c.stash.push(id);
+  return true;
 }
 
 export const survivors = (s: GameState) => living(s, 'hero').length;

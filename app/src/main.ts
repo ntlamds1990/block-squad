@@ -11,8 +11,10 @@ import {
 } from './rules/game';
 import {
   applyBattle, canPromote, ensureSquad, heroLabel, levelOf, newCampaign, nextLevelXp, parseCampaign, promote, recruit,
-  squadMembers, toggleSquad, type BattleReport, type Campaign, type HeroRecord
+  squadMembers, toggleSquad, type BattleReport, type Campaign, type HeroRecord,
+  SLOTS, buy, equip, gearList, sell, unequip
 } from './rules/campaign';
+import { FORGE, ICON, ITEMS, LOOT, RARITY_LABEL, fits, sellPrice, withGear, type GearSlot, type ItemId } from './rules/items';
 import { applyAction, chooseAction, turnOrder } from './rules/ai';
 import { deserialize, serialize } from './rules/save';
 import { View } from './render/view';
@@ -186,6 +188,14 @@ function showEnd(won: boolean, report: BattleReport | null) {
         (up ? ` · <strong>Level ${h.levelAfter}!</strong>${h.levelAfter === 2 ? ' +1 heart' : ''}` : '') +
         (h.canPromote ? ' · <strong>Ready to promote</strong> in the Barracks' : '') + '</div>');
     }
+    if (report.loot) {
+      const it = ITEMS[report.loot];
+      lines.push(`<div class="line loot ${it.rarity}">🎁 Loot chest: ${ICON[report.loot]} <strong>${it.name}</strong> (${RARITY_LABEL[it.rarity]}). ${it.desc}` +
+        (report.lootSold ? ` Your stash was full, so it was sold for ${report.lootSold} gold.` : ' It\'s in your stash.') + '</div>');
+    }
+    if (report.gearBack.length) lines.push(`<div class="line">Your squad carried home the fallen heroes' gear: ${report.gearBack.map(id => ICON[id] + ' ' + ITEMS[id].name).join(', ')}.</div>`);
+    if (report.gearLost.length) lines.push(`<div class="line fell">Lost with the fallen: ${report.gearLost.map(id => ICON[id] + ' ' + ITEMS[id].name).join(', ')}.</div>`);
+    if (report.potions.length) lines.push(`<div class="line">${report.potions.map(esc).join(', ')} drank ${report.potions.length === 1 ? 'a potion' : 'potions'} (used up).</div>`);
     if (report.freeRecruits.length) lines.push(`<div class="line">${report.freeRecruits.map(esc).join(', ')} joined the Barracks for free, so you have a full squad.</div>`);
     box.innerHTML = lines.join('');
   } else if (s.mode !== 'campaign') {
@@ -706,7 +716,7 @@ function saveCampaign() {
 }
 let setupMode: 'campaign' | 'practice' = 'campaign';
 
-const overlays = ['start', 'barracks', 'recruit', 'promote', 'fallen', 'setup', 'end'];
+const overlays = ['start', 'barracks', 'recruit', 'promote', 'fallen', 'gear', 'forge', 'setup', 'end'];
 function showOnly(id: string | null) {
   for (const o of overlays) $(o).hidden = o !== id;
 }
@@ -723,7 +733,7 @@ function showStart() {
   (saved ? $('continueBtn') : $('newBtn')).focus();
 }
 const cap = (t: string) => t[0].toUpperCase() + t.slice(1);
-const heroHp = (h: HeroRecord) => heroMaxHp(h.cls, h.path, levelOf(h.xp));
+const heroHp = (h: HeroRecord) => heroMaxHp(h.cls, h.path, levelOf(h.xp), gearList(h));
 
 /* Barracks */
 
@@ -754,7 +764,9 @@ function renderBarracks(note = '') {
     card.innerHTML = `<b>${esc(h.name)}</b><span class="cls">Level ${lvl} ${heroLabel(h)}</span>` +
       `<span class="stats"><span class="f">♥</span>${heroHp(h)} · ${h.xp} XP${need === null ? '' : ' / ' + need} · ${h.kills} defeated</span>` +
       `<div class="xp" aria-hidden="true"><i style="width:${pct}%"></i></div>` +
-      (canPromote(h) ? `<button class="promo" type="button" data-promote="${h.id}">⭐ Promote</button>` : '') +
+      `<span class="gearRow" aria-label="Gear">${gearList(h).map(id => `<span title="${ITEMS[id].name}">${ICON[id]}</span>`).join('')}</span>` +
+      `<span class="btns"><button class="gearBtn" type="button" data-gear="${h.id}">🎒 Gear</button>` +
+      (canPromote(h) ? `<button class="promo" type="button" data-promote="${h.id}">⭐ Promote</button>` : '') + '</span>' +
       (idx >= 0 ? `<span class="num">${idx + 1}</span>` : '');
     list.appendChild(card);
   }
@@ -764,7 +776,8 @@ function renderBarracks(note = '') {
   rb.innerHTML = `Recruit<small>${camp.heroes.length >= PROGRESS.maxRoster ? 'Barracks full' : PROGRESS.recruitCost + ' gold'}</small>`;
   rb.disabled = camp.heroes.length >= PROGRESS.maxRoster || camp.gold < PROGRESS.recruitCost;
   const fb = $<HTMLButtonElement>('fallenBtn');
-  fb.innerHTML = `Fallen heroes<small>${camp.fallen.length || 'None yet'}</small>`;
+  fb.innerHTML = `Fallen<small>${camp.fallen.length || 'None yet'}</small>`;
+  $('forgeBtn').innerHTML = `Forge<small>${camp.stash.length ? camp.stash.length + ' in stash' : 'Buy gear'}</small>`;
   fb.disabled = !camp.fallen.length;
   $<HTMLButtonElement>('toBattleBtn').disabled = camp.squad.length !== Math.min(PROGRESS.squadSize, camp.heroes.length);
 }
@@ -781,6 +794,8 @@ $('heroList').addEventListener('click', e => {
   unlockAudio();
   const pr = el.closest<HTMLElement>('[data-promote]');
   if (pr) { play('click'); showPromote(pr.dataset.promote!); return; }
+  const gb = el.closest<HTMLElement>('[data-gear]');
+  if (gb) { play('click'); showGear(gb.dataset.gear!); return; }
   const card = el.closest<HTMLElement>('[data-hero]');
   if (!card) return;
   play('click');
@@ -796,6 +811,99 @@ $('heroList').addEventListener('keydown', e => {
 });
 $('barracksBack').addEventListener('click', () => showStart());
 $('toBattleBtn').addEventListener('click', () => { play('click'); showSetup('campaign'); });
+
+/* Gear and the Forge */
+
+const SLOT_LABEL: Record<GearSlot, string> = { weapon: 'Weapon', armour: 'Armour', charm: 'Charm' };
+function itemHTML(id: ItemId, button = '', note = ''): string {
+  const it = ITEMS[id];
+  const forWho = it.cls ? ` For ${CLASSES[it.cls].label}s.` : '';
+  return `<div class="item ${it.rarity}"><span class="ic" aria-hidden="true">${ICON[id]}</span>` +
+    `<span class="tx"><span class="nm">${it.name}<small>${RARITY_LABEL[it.rarity]}</small></span><span class="ds">${it.desc}${forWho}${note}</span></span>${button}</div>`;
+}
+
+let gearHero: string | null = null;
+function showGear(heroId: string, note = '') {
+  gearHero = heroId;
+  renderGear(note);
+  showOnly('gear');
+}
+function renderGear(note = '') {
+  const h = camp.heroes.find(x => x.id === gearHero);
+  if (!h) { showBarracks(); return; }
+  $('gearTitle').textContent = `${h.name}'s gear`;
+  const base = h.path ? { ...CLASSES[h.cls], ...PATHS[h.path].mod } : CLASSES[h.cls];
+  const C = withGear(base, gearList(h));
+  $('gearStats').innerHTML = `Level ${levelOf(h.xp)} ${heroLabel(h)} · <span style="color:var(--heart)">♥</span>${heroHp(h)} · ${C.dmg} damage · ${C.aim}% aim · move ${C.move}` + (C.range > 1 ? ` · range ${C.range}` : '');
+  $('gearSlots').innerHTML = SLOTS.map(sl => {
+    const id = h.gear?.[sl];
+    return id
+      ? itemHTML(id, `<button class="btn" type="button" data-off="${sl}">Take off</button>`)
+      : `<div class="item empty"><span class="ic" aria-hidden="true">·</span><span class="tx"><span class="nm">${SLOT_LABEL[sl]}</span><span class="ds">Empty. Equip something from your stash below.</span></span></div>`;
+  }).join('');
+  const fitting = camp.stash.map((id, i) => ({ id, i })).filter(x => fits(x.id, h.cls));
+  $('gearStashLbl').textContent = fitting.length ? `From your stash (${fitting.length} ${fitting.length === 1 ? 'item fits' : 'items fit'})` : 'Your stash has nothing that fits. Buy gear at the Forge or win battles for loot chests.';
+  $('gearStash').innerHTML = fitting.map(({ id, i }) => {
+    const swap = h.gear?.[ITEMS[id].slot];
+    return itemHTML(id, `<button class="btn primary" type="button" data-on="${i}">Equip</button>`, swap ? ` Swaps out the ${ITEMS[swap].name}.` : '');
+  }).join('');
+  $('gearNote').innerHTML = note;
+}
+$('gearSlots').addEventListener('click', e => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-off]');
+  if (!b || !gearHero) return;
+  play('click');
+  unequip(camp, gearHero, b.dataset.off as GearSlot);
+  saveCampaign();
+  renderGear();
+});
+$('gearStash').addEventListener('click', e => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-on]');
+  if (!b || !gearHero) return;
+  const err = equip(camp, gearHero, Number(b.dataset.on));
+  if (err) { renderGear(err); return; }
+  play('build');
+  saveCampaign();
+  renderGear();
+});
+$('gearBack').addEventListener('click', () => { play('click'); renderBarracks(); showOnly('barracks'); });
+
+function showForge(note = '') {
+  renderForge(note);
+  showOnly('forge');
+}
+function renderForge(note = '') {
+  $('forgeGold').textContent = String(camp.gold);
+  const full = camp.stash.length >= LOOT.stashMax;
+  $('forgeItems').innerHTML = FORGE.map(id => itemHTML(id,
+    `<button class="btn primary" type="button" data-buy="${id}" ${camp.gold < ITEMS[id].price || full ? 'disabled' : ''}>🪙 ${ITEMS[id].price}</button>`)).join('');
+  $('stashLbl').textContent = camp.stash.length ? `Your stash (${camp.stash.length} of ${LOOT.stashMax})` : 'Your stash is empty';
+  const worn = camp.heroes.flatMap(h => gearList(h).map(id => `${ICON[id]} ${ITEMS[id].name} (${h.name})`));
+  $('stashItems').innerHTML = camp.stash.map((id, i) => itemHTML(id, `<button class="btn" type="button" data-sell="${i}">Sell<small>🪙 ${sellPrice(id)}</small></button>`)).join('') +
+    (worn.length ? `<p class="muted">Being worn: ${worn.map(esc).join(', ')}. Take gear off on a hero's Gear screen to sell it.</p>` : '');
+  $('forgeNote').innerHTML = note || (full ? `Your stash is full. Sell something to make room.` : 'Buy here, then equip from a hero\'s 🎒 Gear button in the Barracks.');
+}
+$('forgeBtn').addEventListener('click', () => { play('click'); showForge(); });
+$('forgeItems').addEventListener('click', e => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-buy]');
+  if (!b) return;
+  const id = b.dataset.buy as ItemId;
+  const err = buy(camp, id);
+  if (err) { renderForge(err); return; }
+  play('build');
+  saveCampaign();
+  renderForge(`Bought the <strong>${ITEMS[id].name}</strong>. It's in your stash.`);
+});
+$('stashItems').addEventListener('click', e => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-sell]');
+  if (!b) return;
+  const id = camp.stash[Number(b.dataset.sell)];
+  const g = sell(camp, Number(b.dataset.sell));
+  play('click');
+  saveCampaign();
+  renderForge(id ? `Sold the ${ITEMS[id].name} for ${g} gold.` : '');
+});
+$('forgeBack').addEventListener('click', () => { play('click'); renderBarracks(); showOnly('barracks'); });
 
 /* Recruit */
 

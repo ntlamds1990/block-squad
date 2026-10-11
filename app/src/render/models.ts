@@ -1,6 +1,7 @@
 // Blocky unit models built from boxes.
 import * as THREE from 'three';
 import type { ClassId } from '../rules/balance';
+import { ITEMS, type ItemId } from '../rules/items';
 
 export interface Model { group: THREE.Group; body: THREE.Group; mats: THREE.MeshLambertMaterial[] }
 
@@ -160,4 +161,35 @@ export function buildModel(cls: ClassId, team: 'hero' | 'gob', small = false): M
   ring.position.y = 0.03;
   group.add(ring);
   return { group, body, mats };
+}
+
+// Gear shows on the hero: armour over the chest, a glow on the weapon hand for Rare and Epic weapons,
+// and a little pendant for a charm.
+const ARMOUR_COLOR: Partial<Record<ItemId, string>> = { leather: '#8a5a2c', chainmail: '#b8c0cc', towerShield: '#7f8aa0', dragonScale: '#c0392b' };
+const GLOW: Record<string, string> = { rare: '#5aa9ff', epic: '#c07cff' };
+const WEAPON_GLOW: Partial<Record<ItemId, string>> = { flameSword: '#ff7a2c', frostBow: '#9fdcff', stormStaff: '#fff27a', thunderPick: '#fff27a', sunMace: '#ffe08a' };
+export function dressModel(m: Model, gear: readonly ItemId[]) {
+  const add = (w: number, h: number, d: number, color: string, x: number, y: number, z: number, glow = false) => {
+    const mat = new THREE.MeshLambertMaterial({ color });
+    if (glow) { mat.emissive = new THREE.Color(color); mat.emissiveIntensity = 0.8; }
+    mat.userData.e = mat.emissive.clone();
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    mesh.position.set(x, y, z);
+    mesh.castShadow = true;
+    m.body.add(mesh);
+    m.mats.push(mat);
+  };
+  for (const id of gear) {
+    const it = ITEMS[id];
+    if (it.slot === 'armour') {
+      const c = ARMOUR_COLOR[id] ?? '#b8c0cc';
+      add(0.5, 0.3, 0.06, c, 0, 0.74, -0.16);
+      add(0.16, 0.1, 0.32, c, -0.31, 0.92, 0);
+      add(0.16, 0.1, 0.32, c, 0.31, 0.92, 0);
+    } else if (it.slot === 'weapon' && it.rarity !== 'common') {
+      add(0.12, 0.12, 0.12, WEAPON_GLOW[id] ?? GLOW[it.rarity], 0.31, 0.47, 0.14, true);
+    } else if (it.slot === 'charm') {
+      add(0.08, 0.08, 0.04, it.rarity === 'common' ? '#f2c14e' : GLOW[it.rarity], 0, 0.86, 0.16, it.rarity !== 'common');
+    }
+  }
 }
