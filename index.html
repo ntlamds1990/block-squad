@@ -185,7 +185,7 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 .card .eyebrow { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); font-weight: 800; }
 .card ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 14px; line-height: 1.4; color: var(--muted); }
 .card ul strong { color: var(--ink); }
-.seg { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.seg { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
 .seg .btn { font-size: 14px; }
 .seg .btn small { display: block; font-size: 11px; font-weight: 700; opacity: 0.75; }
 @media (min-width: 720px) {
@@ -218,18 +218,19 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 
   <div class="overlay" id="start">
     <div class="card">
-      <div class="eyebrow">Prototype · Meadow village</div>
+      <div class="eyebrow">Prototype · A new village every battle</div>
       <h1>Block Squad</h1>
       <p>Goblins have raided the meadow village. Lead your squad of four heroes and drive them out.</p>
       <div class="seg" role="group" aria-label="Difficulty">
-        <button class="btn on" id="diffEasy" type="button">Easy<small>Goblins aim worse</small></button>
-        <button class="btn" id="diffNormal" type="button">Normal<small>Tougher, smarter goblins</small></button>
+        <button class="btn on" id="diffEasy" type="button">Easy<small>6 goblins</small></button>
+        <button class="btn" id="diffNormal" type="button">Normal<small>7 tougher goblins</small></button>
+        <button class="btn" id="diffHard" type="button">Hard<small>8 sharpshooters</small></button>
       </div>
       <ul>
-        <li><strong>Tap a hero</strong>, then a blue tile to move. Each hero gets 2 actions a turn.</li>
+        <li><strong>Tap a hero</strong>, then a blue tile to plan a route. Tap more tiles to add stops, then tap the end again to walk. Each hero gets 2 actions a turn.</li>
         <li><strong>Tap a goblin</strong> on a red tile to see your hit chance, then tap again to attack. Attacking ends that hero's turn.</li>
         <li><strong>Walls are cover.</strong> Low walls make you harder to hit, tall walls even more. A miss still grazes for 1.</li>
-        <li><strong>Ember's Fireball</strong> blows up blocks. <strong>Digby</strong> builds walls and digs them out.</li>
+        <li><strong>Ember's Fireball</strong> blows up blocks. <strong>Digby</strong> builds walls and digs them out. <strong>Sir Bram's Spin Attack</strong> hits every goblin next to him.</li>
         <li>Drag to turn the camera, pinch to zoom.</li>
       </ul>
       <button class="btn primary" id="startBtn" type="button">Start battle</button>
@@ -322,22 +323,60 @@ for (const k in TEX) MAT[k] = new THREE.MeshLambertMaterial({ map: TEX[k] });
 const BLOCK_COLOR = { stone: '#8d8d8d', cobble: '#808080', plank: '#a2763f', plank2: '#c4975b', hay: '#e2c048', log: '#6b4a2b', leaves: '#3f8f2f', roof: '#b5462f' };
 
 /* ---------- Map ---------- */
-const SIZE = 12;
-// . grass  f fence  h haystack  s low stone (well)  S tall stone  C cottage  T tree
-const MAP = [
-  'T....SS....T',
-  '............',
-  '.hh..ff..CC.',
-  '.....ff..CC.',
-  '..s.......f.',
-  'T....ss.....',
-  '.....ss....T',
-  '.f.......s..',
-  '.CC..ff.....',
-  '.CC..ff..hh.',
-  '............',
-  'T....SS....T'
-];
+const SIZE = 16;
+const MID = (SIZE - 1) / 2;
+// . grass  f fence  h haystack  s low stone  S tall stone  C cottage  T tree
+let MAP = [];
+// Random village: build the goblin half, then mirror it through the centre so both sides get the same cover
+function generateMap() {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    const g = Array.from({ length: SIZE }, () => Array(SIZE).fill('.'));
+    const half = SIZE / 2;
+    const free = (x, z, w, h) => {
+      for (let dz = -1; dz <= h; dz++) for (let dx = -1; dx <= w; dx++) {
+        const cx = x + dx, cz = z + dz;
+        if (cx < 0 || cz < 0 || cx >= SIZE || cz >= half) continue;
+        if (g[cz][cx] !== '.') return false;
+      }
+      return true;
+    };
+    const put = (x, z, w, h, ch) => { for (let dz = 0; dz < h; dz++) for (let dx = 0; dx < w; dx++) g[z + dz][x + dx] = ch; };
+    const tryPlace = (w, h, ch, zMin) => {
+      for (let i = 0; i < 40; i++) {
+        const x = Math.floor(Math.random() * (SIZE - w + 1));
+        const z = zMin + Math.floor(Math.random() * (half - h - zMin + 1));
+        if (z + h > half) continue;
+        if (free(x, z, w, h)) { put(x, z, w, h, ch); return true; }
+      }
+      return false;
+    };
+    const ri = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+    for (let i = ri(1, 2); i > 0; i--) tryPlace(2, 2, 'C', 3);
+    for (let i = ri(1, 2); i > 0; i--) { const len = ri(2, 3); Math.random() < 0.5 ? tryPlace(len, 1, 'S', 3) : tryPlace(1, len, 'S', 3); }
+    for (let i = ri(2, 3); i > 0; i--) { const len = ri(2, 4); Math.random() < 0.6 ? tryPlace(len, 1, 'f', 3) : tryPlace(1, len, 'f', 3); }
+    for (let i = ri(1, 2); i > 0; i--) Math.random() < 0.5 ? tryPlace(2, 1, 'h', 3) : tryPlace(1, 2, 'h', 3);
+    for (let i = ri(2, 3); i > 0; i--) tryPlace(1, 1, 's', 3);
+    for (let i = ri(2, 4); i > 0; i--) tryPlace(1, 1, 'T', 2);
+    // Trees along the back edge corners for flavour
+    if (Math.random() < 0.7) g[0][0] = 'T';
+    if (Math.random() < 0.7) g[0][SIZE - 1] = 'T';
+    for (let z = 0; z < half; z++) for (let x = 0; x < SIZE; x++) g[SIZE - 1 - z][SIZE - 1 - x] = g[z][x];
+    // Every open tile must be reachable, so no hero or goblin is ever boxed in
+    let open = 0, start = null;
+    for (let z = 0; z < SIZE; z++) for (let x = 0; x < SIZE; x++) if (g[z][x] === '.') { open++; if (!start) start = [x, z]; }
+    const seen = new Set([start.join()]), q = [start];
+    while (q.length) {
+      const [x, z] = q.shift();
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = x + dx, nz = z + dz;
+        if (nx < 0 || nz < 0 || nx >= SIZE || nz >= SIZE || g[nz][nx] !== '.' || seen.has(nx + ',' + nz)) continue;
+        seen.add(nx + ',' + nz); q.push([nx, nz]);
+      }
+    }
+    if (seen.size === open) return g.map(r => r.join(''));
+  }
+  return Array.from({ length: SIZE }, () => '.'.repeat(SIZE));
+}
 const KINDS = {
   '.': { h: 0 }, f: { h: 1, mat: 'plank2' }, h: { h: 1, mat: 'hay' }, s: { h: 1, mat: 'stone' },
   S: { h: 2, mat: 'stone' }, C: { h: 2, mat: 'plank', top: 'roof' }, T: { h: 2, mat: 'log', top: 'leaves' }
@@ -346,7 +385,7 @@ const KINDS = {
 /* ---------- Classes ---------- */
 const CLASSES = {
   knight: { label: 'Knight', hp: 6, move: 4, range: 1, dmg: 3, aim: 90, weapon: 'Sword',
-    ability: { key: 'cleave', name: 'Cleave', cd: 3, desc: '2 damage to every goblin next to Sir Bram. Never misses.' } },
+    ability: { key: 'cleave', name: 'Spin Attack', cd: 3, desc: 'Sir Bram spins his sword and hits every goblin standing right next to him for 2 damage. It never misses, so save it for when goblins crowd around him.' } },
   archer: { label: 'Archer', hp: 4, move: 5, range: 7, dmg: 2, aim: 85, weapon: 'Bow',
     ability: { key: 'volley', name: 'Volley', cd: 3, range: 7, desc: '1 damage to every goblin in a 3x3 area. Never misses.' } },
   mage: { label: 'Mage', hp: 3, move: 4, range: 5, dmg: 2, aim: 80, weapon: 'Firebolt',
@@ -356,16 +395,23 @@ const CLASSES = {
   grunt: { label: 'Goblin', hp: 3, move: 4, range: 1, dmg: 2, aim: 75, weapon: 'Club' },
   garcher: { label: 'Goblin Archer', hp: 2, move: 4, range: 6, dmg: 2, aim: 65, weapon: 'Bow' }
 };
-const HERO_START = [
-  { cls: 'knight', name: 'Sir Bram', x: 3, z: 10 },
-  { cls: 'archer', name: 'Wren', x: 4, z: 10 },
-  { cls: 'mage', name: 'Ember', x: 7, z: 10 },
-  { cls: 'builder', name: 'Digby', x: 8, z: 10 }
+const HERO_SQUAD = [
+  { cls: 'knight', name: 'Sir Bram' },
+  { cls: 'archer', name: 'Wren' },
+  { cls: 'mage', name: 'Ember' },
+  { cls: 'builder', name: 'Digby' }
 ];
-const GOB_START = [
-  { cls: 'grunt', x: 2, z: 1 }, { cls: 'grunt', x: 6, z: 1 }, { cls: 'grunt', x: 9, z: 1 },
-  { cls: 'garcher', x: 4, z: 1 }, { cls: 'garcher', x: 7, z: 0 }
-];
+const GOB_SQUAD = {
+  easy: ['grunt', 'grunt', 'grunt', 'grunt', 'garcher', 'garcher'],
+  normal: ['grunt', 'grunt', 'grunt', 'grunt', 'garcher', 'garcher', 'garcher'],
+  hard: ['grunt', 'grunt', 'grunt', 'grunt', 'grunt', 'garcher', 'garcher', 'garcher']
+};
+function randomSpots(zFrom, zTo, n) {
+  const spots = [];
+  for (let z = zFrom; z <= zTo; z++) for (let x = 0; x < SIZE; x++) if (MAP[z][x] === '.') spots.push([x, z]);
+  for (let i = spots.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [spots[i], spots[j]] = [spots[j], spots[i]]; }
+  return spots.slice(0, n);
+}
 
 /* ---------- Three.js scene ---------- */
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
@@ -375,7 +421,7 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 const scene = new THREE.Scene();
 scene.fog = new THREE.Fog(0xcfe9f7, 40, 80);
 const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
-const CENTER = new THREE.Vector3(5.5, 0, 5.5);
+const CENTER = new THREE.Vector3(MID, 0, MID);
 const controls = new THREE.OrbitControls(camera, canvas);
 controls.target.copy(CENTER);
 controls.enableDamping = true;
@@ -389,12 +435,12 @@ controls.panSpeed = 0.7;
 
 scene.add(new THREE.HemisphereLight(0xe2f2ff, 0x6a5a40, 0.78));
 const sun = new THREE.DirectionalLight(0xfff0d0, 0.85);
-sun.position.set(14, 20, 12);
+sun.position.set(MID + 9, 22, MID + 7);
 sun.target.position.copy(CENTER);
 scene.add(sun.target);
 sun.castShadow = true;
-sun.shadow.mapSize.set(1024, 1024);
-Object.assign(sun.shadow.camera, { left: -11, right: 11, top: 11, bottom: -11, near: 1, far: 60 });
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -14, right: 14, top: 14, bottom: -14, near: 1, far: 70 });
 sun.shadow.bias = -0.0008;
 scene.add(sun);
 
@@ -471,7 +517,7 @@ let shake = 0;
 let tiles = [];
 let units = [];
 let pickables = [];
-const S = { turn: 1, phase: 'start', sel: null, mode: 'move', pending: null, busy: false, diff: 'easy' };
+const S = { turn: 1, phase: 'start', sel: null, mode: 'move', pending: null, plan: null, busy: false, diff: 'easy' };
 
 const inside = (x, z) => x >= 0 && z >= 0 && x < SIZE && z < SIZE;
 const tileAt = (x, z) => inside(x, z) ? tiles[z][x] : null;
@@ -520,11 +566,11 @@ function buildWorld() {
   const baseTex = TEX.dirt.clone();
   baseTex.needsUpdate = true;
   baseTex.wrapS = baseTex.wrapT = THREE.RepeatWrapping;
-  baseTex.repeat.set(12, 2);
+  baseTex.repeat.set(SIZE, 2);
   const baseMat = new THREE.MeshLambertMaterial({ map: baseTex });
-  [[12, 1.6, -1.2], [10, 1.4, -2.7], [7, 1.2, -4.0], [4, 1, -5.1]].forEach(([w, h, y]) => {
+  [[SIZE, 1.6, -1.2], [SIZE - 3, 1.4, -2.7], [SIZE - 7, 1.2, -4.0], [SIZE - 11, 1, -5.1]].forEach(([w, h, y]) => {
     const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, w), baseMat);
-    b.position.set(5.5, y, 5.5);
+    b.position.set(MID, y, MID);
     world.add(b);
   });
 
@@ -646,7 +692,7 @@ function buildModel(u) {
 function spawn(def, team, id) {
   const C = CLASSES[def.cls];
   let hp = C.hp;
-  if (team === 'gob' && S.diff === 'normal') hp += 1;
+  if (team === 'gob' && S.diff !== 'easy') hp += 1;
   const u = {
     id, team, cls: def.cls, C, name: def.name || C.label, x: def.x, z: def.z,
     hp, maxHp: hp, ap: 0, cd: 0, alive: true, mats: []
@@ -669,17 +715,20 @@ function heartsHTML(u) {
 function renderHearts(u) { u.label.innerHTML = heartsHTML(u); }
 
 /* ---------- Rules ---------- */
-function reach(u, steps) {
+function reach(u, steps) { return reachFrom(u.x, u.z, steps, u); }
+function reachFrom(sx, sz, steps, self) {
   const out = new Map();
-  out.set(key(u.x, u.z), { x: u.x, z: u.z, d: 0, prev: null });
-  const q = [[u.x, u.z]];
+  out.set(key(sx, sz), { x: sx, z: sz, d: 0, prev: null });
+  const q = [[sx, sz]];
   while (q.length) {
     const [x, z] = q.shift();
     const cur = out.get(key(x, z));
     if (cur.d >= steps) continue;
     for (const [dx, dz] of N4) {
       const nx = x + dx, nz = z + dz, k = key(nx, nz);
-      if (!inside(nx, nz) || out.has(k) || hAt(nx, nz) > 0 || unitAt(nx, nz)) continue;
+      if (!inside(nx, nz) || out.has(k) || hAt(nx, nz) > 0) continue;
+      const occ = unitAt(nx, nz);
+      if (occ && occ !== self) continue;
       out.set(k, { x: nx, z: nz, d: cur.d + 1, prev: cur });
       q.push([nx, nz]);
     }
@@ -726,7 +775,8 @@ function hitInfo(a, t, fx, fz) {
   if (cover === 0 && a.C.range > 1) chance += 10;
   const d = dist(fx, fz, t.x, t.z);
   if (a.C.range > 1 && d > 5) chance -= Math.round((d - 5) * 5);
-  if (a.team === 'gob' && S.diff === 'easy') chance -= 12;
+  if (a.team === 'gob' && S.diff === 'easy') chance -= 5;
+  if (a.team === 'gob' && S.diff === 'hard') chance += 5;
   chance = Math.max(10, Math.min(95, Math.round(chance)));
   return { chance, cover, dmg: a.C.dmg };
 }
@@ -843,7 +893,6 @@ async function doAttack(a, t) {
   else await projectile(new THREE.Vector3(a.x, 0.9, a.z), new THREE.Vector3(t.x, 0.8, t.z), a.cls === 'mage' ? 'bolt' : 'arrow');
   const hit = Math.random() * 100 < info.chance;
   if (hit) await damage(t, info.dmg, '-' + info.dmg, '#ffffff');
-  else if (a.team === 'gob' && S.diff === 'easy') floatText(headPos(t), 'Miss', '#cfd6ea');
   else await damage(t, 1, 'Graze -1', '#cfd6ea');
 }
 async function doDig(u, tile) {
@@ -925,6 +974,7 @@ function startPlayerTurn() {
   heroes().forEach(h => { h.ap = 2; if (h.cd > 0) h.cd--; });
   S.mode = 'move';
   S.pending = null;
+  S.plan = null;
   S.sel = heroes()[0] || null;
   banner('Your turn');
   renderAll();
@@ -932,7 +982,7 @@ function startPlayerTurn() {
 async function endPlayerTurn() {
   if (S.phase !== 'player' || S.busy) return;
   S.phase = 'enemy';
-  S.sel = null; S.pending = null;
+  S.sel = null; S.pending = null; S.plan = null;
   heroes().forEach(h => { h.ap = 0; });
   renderAll();
   banner("Goblins' turn");
@@ -949,6 +999,7 @@ async function endPlayerTurn() {
 }
 async function afterHeroAction() {
   S.pending = null;
+  S.plan = null;
   if (checkEnd()) return;
   const sel = S.sel;
   if (sel && (!sel.alive || sel.ap <= 0)) {
@@ -981,7 +1032,7 @@ async function goblinAct(g) {
       const info = hitInfo(g, h, n.x, n.z);
       let score = info.chance / 100 * info.dmg * 10 + (h.hp <= info.dmg ? 8 : 0) - n.d * 0.3;
       if (!easy) score += tileCover(n.x, n.z, hs) * 3;
-      else score += Math.random() * 8;
+      else score += Math.random() * 3;
       if (!best || score > best.score) best = { n, h, score };
     }
   }
@@ -999,7 +1050,7 @@ async function goblinAct(g) {
     hs.forEach(h => { nearest = Math.min(nearest, dist(n.x, n.z, h.x, h.z)); });
     let score = Math.abs(nearest - want) * 2;
     if (!easy) score -= tileCover(n.x, n.z, hs) * 1.5;
-    else score += Math.random() * 1.5;
+    else score += Math.random() * 0.6;
     if (score < pickScore) { pickScore = score; pickN = n; }
   }
   if (pickN && pickN.d > 0) await moveAlong(g, pathTo(pickN));
@@ -1010,6 +1061,7 @@ function setSel(u) {
   S.sel = u;
   S.mode = 'move';
   S.pending = null;
+  S.plan = null;
   renderAll();
 }
 function moveTiles(u) {
@@ -1023,7 +1075,21 @@ async function run(fn) {
   renderAll();
   try { await fn(); } finally { S.busy = false; }
 }
+function planSteps() { return S.plan ? S.plan.path.length : 0; }
+function planReach(u) {
+  if (!S.plan) return moveTiles(u);
+  const r = reachFrom(S.plan.end.x, S.plan.end.z, u.C.move - planSteps(), u);
+  r.delete(key(S.plan.end.x, S.plan.end.z));
+  return r;
+}
+function walkPlan() {
+  const u = S.sel, plan = S.plan;
+  if (!u || !plan || S.busy) return;
+  S.plan = null;
+  run(async () => { u.ap -= 1; await moveAlong(u, plan.path); }).then(afterHeroAction);
+}
 async function confirmPending() {
+  if (S.plan && !S.pending) { walkPlan(); return; }
   const p = S.pending, u = S.sel;
   if (!p || !u || S.busy) return;
   if (p.kind === 'attack') {
@@ -1042,6 +1108,8 @@ function handleTap(x, z) {
   const there = unitAt(x, z);
   const p = S.pending;
   if (p && p.x === x && p.z === z) { confirmPending(); return; }
+  if (S.plan && S.mode === 'move' && S.plan.end.x === x && S.plan.end.z === z) { walkPlan(); return; }
+  if (there && there === u && S.mode === 'move' && S.plan) { S.plan = null; renderAll(); return; }
   if (there && there.team === 'hero') {
     if (S.mode === 'ability' && u && u.C.ability.key === 'cleave' && there === u) { setPendingAbility(x, z); return; }
     setSel(there); return;
@@ -1052,6 +1120,7 @@ function handleTap(x, z) {
     S.mode = 'move'; S.pending = null; renderAll(); return;
   }
   if (there && there.team === 'gob') {
+    S.plan = null;
     if (u.ap > 0 && canAttackFrom(u, there, u.x, u.z)) {
       S.mode = 'attack';
       S.pending = { kind: 'attack', target: there, x, z };
@@ -1063,13 +1132,18 @@ function handleTap(x, z) {
   }
   if (u.cls === 'builder' && u.ap > 0) {
     const t = digTargets(u).find(t => t.x === x && t.z === z);
-    if (t) { S.mode = 'attack'; S.pending = { kind: 'dig', tile: t, x, z }; renderAll(); return; }
+    if (t && !S.plan) { S.mode = 'attack'; S.pending = { kind: 'dig', tile: t, x, z }; renderAll(); return; }
   }
   if (S.mode === 'attack') { S.mode = 'move'; S.pending = null; renderAll(); return; }
-  const m = moveTiles(u).get(key(x, z));
-  if (m) {
-    run(async () => { u.ap -= 1; await moveAlong(u, pathTo(m)); }).then(afterHeroAction);
+  if (u.ap <= 0) return;
+  // Route planning: the first tap plans a route, more taps add stops, tapping the end again walks it
+  if (S.plan) {
+    const ext = planReach(u).get(key(x, z));
+    if (ext) { S.plan = { path: S.plan.path.concat(pathTo(ext)), end: { x, z } }; renderAll(); return; }
   }
+  const m = moveTiles(u).get(key(x, z));
+  if (m) { S.plan = { path: pathTo(m), end: { x, z } }; renderAll(); return; }
+  if (S.plan) { S.plan = null; renderAll(); }
 }
 function setPendingAbility(x, z) {
   S.pending = { kind: 'ability', x, z };
@@ -1084,7 +1158,11 @@ function renderHighlights() {
   selRing.visible = !!(u && u.alive && S.phase === 'player');
   if (!selRing.visible || S.busy) return;
   if (S.mode === 'move' && u.ap > 0) {
-    moveTiles(u).forEach(n => hl(n.x, n.z, COL.move, 0.42));
+    planReach(u).forEach(n => hl(n.x, n.z, COL.move, 0.42));
+    if (S.plan) {
+      S.plan.path.forEach(n => hl(n.x, n.z, COL.area, 0.5));
+      hl(S.plan.end.x, S.plan.end.z, COL.area, 0.9);
+    }
     attackTargets(u).forEach(t => hl(t.x, t.z, COL.attack, 0.6));
     digTargets(u).forEach(t => hl(t.x, t.z, COL.dig, 0.55, t.h));
   }
@@ -1131,7 +1209,7 @@ function renderPanel() {
   if (u && u.alive) {
     atk.innerHTML = u.C.weapon + '<small>' + (u.C.range === 1 ? 'Melee' : 'Range ' + u.C.range) + '</small>';
     const ab = u.C.ability;
-    abl.innerHTML = ab.name + '<small>' + (u.cd > 0 ? 'Ready in ' + u.cd : abilityTargets(u).length === 0 ? (ab.key === 'cleave' ? 'No goblin next to you' : 'No target') : ab.cd === 0 ? '1 action' : 'Ready') + '</small>';
+    abl.innerHTML = ab.name + '<small>' + (u.cd > 0 ? 'Ready in ' + u.cd : abilityTargets(u).length === 0 ? (ab.key === 'cleave' ? 'No goblin adjacent' : 'No target') : ab.cd === 0 ? '1 action' : 'Ready') + '</small>';
     atk.disabled = !myTurn || u.ap <= 0 || (attackTargets(u).length === 0 && digTargets(u).length === 0);
     abl.disabled = !myTurn || !abilityReady(u);
   } else {
@@ -1141,8 +1219,8 @@ function renderPanel() {
   }
   atk.classList.toggle('on', S.mode === 'attack');
   abl.classList.toggle('on', S.mode === 'ability');
-  conf.disabled = !myTurn || !S.pending;
-  conf.textContent = !S.pending ? 'Confirm' : S.pending.kind === 'attack' ? 'Attack!' : S.pending.kind === 'dig' ? 'Dig!' : u && u.C.ability.key === 'build' ? 'Build!' : 'Cast!';
+  conf.disabled = !myTurn || (!S.pending && !S.plan);
+  conf.textContent = !S.pending ? (S.plan ? 'Move!' : 'Confirm') : S.pending.kind === 'attack' ? 'Attack!' : S.pending.kind === 'dig' ? 'Dig!' : u && u.C.ability.key === 'build' ? 'Build!' : 'Cast!';
 
   $('hint').innerHTML = hintText();
   S.info = null;
@@ -1162,22 +1240,24 @@ function hintText() {
   if (p && p.kind === 'ability') {
     const ab = u.C.ability;
     if (ab.key === 'build') return '<strong>Build</strong> a stone block here. Tap again or press Build!';
-    if (ab.key === 'cleave') return '<strong>Cleave</strong> hits ' + goblins().filter(g => adjacent(u.x, u.z, g.x, g.z)).length + ' goblin(s) for 2. Press Cast!';
+    if (ab.key === 'cleave') return '<strong>Spin Attack</strong> hits ' + goblins().filter(g => adjacent(u.x, u.z, g.x, g.z)).length + ' goblin(s) for 2. Press Cast!';
     const cells = area3(p.x, p.z);
     const n = goblins().filter(g => cells.some(([x, z]) => x === g.x && z === g.z)).length;
     const blocks = cells.reduce((s, [x, z]) => s + hAt(x, z), 0);
     return '<strong>' + ab.name + '</strong> here hits ' + n + ' goblin' + (n === 1 ? '' : 's') + (ab.key === 'fireball' ? ' and blows up ' + blocks + ' block' + (blocks === 1 ? '' : 's') : '') + '. Tap again or press Cast!';
   }
-  if (S.mode === 'ability') return u.C.ability.desc + ' Tap a highlighted tile.';
+  if (S.plan) { const left = u.C.move - planSteps(); return '<strong>Route planned</strong>: ' + planSteps() + ' of ' + u.C.move + ' tiles. Tap the yellow end tile again (or Move!) to walk' + (left > 0 ? ', or tap a blue tile to add a stop.' : '.') + ' Tap ' + u.name + ' to clear it.'; }
+  if (S.mode === 'ability') return u.C.ability.desc + (u.C.ability.key === 'cleave' ? ' Press Cast! to spin.' : ' Tap a highlighted tile.');
   if (S.mode === 'attack') return 'Tap a goblin on a red tile to aim.' + (u.cls === 'builder' ? ' Tap a brown block to dig it out.' : '');
   if (u.ap <= 0) return '<strong>' + u.name + '</strong> is done this turn. Pick another hero or end the turn.';
-  return '<strong>' + u.name + '</strong> has ' + u.ap + (u.ap === 1 ? ' action' : ' actions') + '. Tap a blue tile to move, or a goblin on a red tile to attack.';
+  return '<strong>' + u.name + '</strong> has ' + u.ap + (u.ap === 1 ? ' action' : ' actions') + '. Tap a blue tile to plan a route, or a goblin on a red tile to attack.';
 }
 function renderAll() { renderHighlights(); renderPanel(); }
 
 /* ---------- Buttons ---------- */
 $('btnAttack').addEventListener('click', () => {
   if (S.phase !== 'player' || S.busy || !S.sel) return;
+  S.plan = null;
   S.mode = S.mode === 'attack' ? 'move' : 'attack';
   S.pending = null;
   const ts = attackTargets(S.sel);
@@ -1186,6 +1266,7 @@ $('btnAttack').addEventListener('click', () => {
 });
 $('btnAbility').addEventListener('click', () => {
   if (S.phase !== 'player' || S.busy || !S.sel) return;
+  S.plan = null;
   S.mode = S.mode === 'ability' ? 'move' : 'ability';
   S.pending = null;
   if (S.mode === 'ability' && S.sel.C.ability.key === 'cleave') S.pending = { kind: 'ability', x: S.sel.x, z: S.sel.z };
@@ -1197,17 +1278,26 @@ function setDiff(d) {
   S.diff = d;
   $('diffEasy').classList.toggle('on', d === 'easy');
   $('diffNormal').classList.toggle('on', d === 'normal');
+  $('diffHard').classList.toggle('on', d === 'hard');
 }
 $('diffEasy').addEventListener('click', () => setDiff('easy'));
 $('diffNormal').addEventListener('click', () => setDiff('normal'));
+$('diffHard').addEventListener('click', () => setDiff('hard'));
 $('startBtn').addEventListener('click', () => { $('start').hidden = true; newGame(); });
 $('againBtn').addEventListener('click', () => { $('end').hidden = true; $('start').hidden = false; $('startBtn').focus(); });
 
-function newGame() {
+function setupBoard() {
+  MAP = generateMap();
   buildWorld();
   units = [];
-  HERO_START.forEach((d, i) => units.push(spawn(d, 'hero', 'h' + i)));
-  GOB_START.forEach((d, i) => units.push(spawn(d, 'gob', 'g' + i)));
+  const hs = randomSpots(SIZE - 3, SIZE - 1, HERO_SQUAD.length);
+  HERO_SQUAD.forEach((d, i) => units.push(spawn({ cls: d.cls, name: d.name, x: hs[i][0], z: hs[i][1] }, 'hero', 'h' + i)));
+  const roster = GOB_SQUAD[S.diff];
+  const gs = randomSpots(0, 2, roster.length);
+  roster.forEach((cls, i) => units.push(spawn({ cls, x: gs[i][0], z: gs[i][1] }, 'gob', 'g' + i)));
+}
+function newGame() {
+  setupBoard();
   S.turn = 1;
   fitCamera();
   startPlayerTurn();
@@ -1245,10 +1335,10 @@ function fitCamera() {
   camera.updateProjectionMatrix();
   const vfov = camera.fov * Math.PI / 180;
   const hfov = 2 * Math.atan(Math.tan(vfov / 2) * camera.aspect);
-  const needW = 13, needH = 11;
+  const needW = SIZE + 1, needH = SIZE - 1;
   const d = Math.max((needW / 2) / Math.tan(hfov / 2), (needH / 2) / Math.tan(vfov / 2) * 1.2, 11);
   const dir = new THREE.Vector3(0, 0.86, 0.51).normalize();
-  controls.target.set(5.5, 0, w < h ? 7.0 : 6.2);
+  controls.target.set(MID, 0, MID + (w < h ? 1.8 : 0.8));
   camera.position.copy(controls.target).addScaledVector(dir, d);
   controls.maxDistance = Math.max(34, d * 1.3);
   controls.update();
@@ -1326,16 +1416,13 @@ function frame() {
 
 // Board behind the start screen
 resize();
-buildWorld();
-units = [];
-HERO_START.forEach((d, i) => units.push(spawn(d, 'hero', 'h' + i)));
-GOB_START.forEach((d, i) => units.push(spawn(d, 'gob', 'g' + i)));
+setupBoard();
 fitCamera();
 renderAll();
 frame();
 $('startBtn').focus();
 
-window.__blockSquad = { S, units: () => units, handleTap, endPlayerTurn, confirmPending };
+window.__blockSquad = { S, units: () => units, handleTap, endPlayerTurn, confirmPending, map: () => MAP, generateMap };
 })();
 </script>
 
