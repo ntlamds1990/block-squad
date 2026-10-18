@@ -12,7 +12,7 @@ import { play, type Sfx } from '../ui/audio';
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 export interface UnitView {
-  id: string; team: 'hero' | 'gob'; cls: ClassId; name: string;
+  id: string; team: 'hero' | 'gob'; cls: ClassId; name: string; player?: number;
   group: THREE.Group; body: THREE.Group; mats: THREE.MeshLambertMaterial[]; label: HTMLDivElement;
   x: number; z: number; hp: number; maxHp: number; alive: boolean; guard: boolean; preview: number; hidden: boolean;
   status: string; // small icons: frozen, rooted, blessed
@@ -91,6 +91,9 @@ export class View {
   private selRing: THREE.Mesh;
   private size = 16;
   theme: Theme = 'village';
+  // Whose eyes we see through: the side this phone commands, and in co-op which player it is
+  me: 'hero' | 'gob' = 'hero';
+  seat: number | undefined = undefined;
   units = new Map<string, UnitView>();
   selected: string | null = null;
   inspected: string | null = null;
@@ -194,7 +197,7 @@ export class View {
       for (const m of s.tiles[z][x].blocks) this.addBlock(x, z, m);
       if (s.tiles[z][x].fire > 0) this.setFire(x, z, true);
       if (s.tiles[z][x].tower) this.setTower(x, z, true);
-      if (s.tiles[z][x].trap) this.setTrap(x, z, true);
+      if (this.ownTrap(s.tiles[z][x].trap)) this.setTrap(x, z, true);
     }
     for (const u of s.units) if (u.alive) this.addUnit(u);
     this.updateFog();
@@ -448,6 +451,13 @@ export class View {
     this.towers.set(k, g);
   }
 
+  // Snares stay hidden from the other squad in a Duel
+  private ownTrap(owner?: string): boolean {
+    if (!owner) return false;
+    const v = this.units.get(owner);
+    return !v || v.team === this.me;
+  }
+
   private setTrap(x: number, z: number, on: boolean) {
     const k = key(x, z);
     const old = this.traps.get(k);
@@ -493,17 +503,18 @@ export class View {
 
   private addUnit(u: Unit): UnitView {
     const small = u.cls === 'grunt' && u.maxHp <= BALANCE.shaman.summonHp;
-    const m = buildModel(u.cls, u.team, small);
+    const ring = u.team !== this.me ? 'gob' : this.seat !== undefined && u.player !== undefined && u.player !== this.seat ? 'ally' : 'hero';
+    const m = buildModel(u.cls, ring, small);
     if (u.gear?.length) dressModel(m, u.gear);
     m.group.position.set(u.x, this.baseY(u.x, u.z), u.z);
     m.group.rotation.y = u.team === 'hero' ? Math.PI : 0;
     m.group.userData.unitId = u.id;
     this.world.add(m.group);
     const label = document.createElement('div');
-    label.className = 'hp' + (u.team === 'gob' ? ' gob' : '');
+    label.className = 'hp' + (ring === 'hero' ? '' : ' ' + ring);
     this.labels.appendChild(label);
     const v: UnitView = {
-      id: u.id, team: u.team, cls: u.cls, name: u.name, ...m, label,
+      id: u.id, team: u.team, cls: u.cls, name: u.name, player: u.player, ...m, label,
       x: u.x, z: u.z, hp: u.hp, maxHp: u.maxHp, alive: true, guard: u.guard, preview: 0, hidden: false, status: statusOf(u)
     };
     this.units.set(u.id, v);
@@ -535,7 +546,7 @@ export class View {
   private sees(x: number, z: number): boolean {
     if (this.theme !== 'forest') return true;
     for (const v of this.units.values()) {
-      if (v.alive && v.team === 'hero' && Math.hypot(v.x - x, v.z - z) <= BALANCE.sight.forestHero + 0.01) return true;
+      if (v.alive && v.team === this.me && Math.hypot(v.x - x, v.z - z) <= BALANCE.sight.forestHero + 0.01) return true;
     }
     return false;
   }
@@ -561,7 +572,7 @@ export class View {
     for (let i = used; i < this.fogPool.length; i++) this.fogPool[i].visible = false;
     this.units.forEach(v => {
       if (!v.alive) return;
-      v.hidden = v.team === 'gob' && !this.sees(v.x, v.z);
+      v.hidden = v.team !== this.me && !this.sees(v.x, v.z);
       v.group.visible = !v.hidden;
     });
   }
@@ -671,7 +682,7 @@ export class View {
 
   // Heroes jump for joy and confetti flies when the battle is won
   async celebrate() {
-    const heroes = [...this.units.values()].filter(v => v.alive && v.team === 'hero' && v.cls !== 'turret' && v.cls !== 'tnt');
+    const heroes = [...this.units.values()].filter(v => v.alive && v.team === this.me && v.cls !== 'turret' && v.cls !== 'tnt');
     const colors = ['#f2c14e', '#4c9bff', '#7cff8a', '#ff7ab0', '#c07cff'];
     heroes.forEach((v, i) => this.burst(new THREE.Vector3(v.x, 1.6 + v.group.position.y, v.z), colors[i % colors.length], 14, 0.08, 4));
     for (let hop = 0; hop < 3; hop++) {
@@ -773,7 +784,7 @@ export class View {
         if (!v) return;
         const fx = v.x, fz = v.z;
         this.face(v, e.x, e.z);
-        const show = !(v.team === 'gob' && !this.sees(fx, fz) && !this.sees(e.x, e.z));
+        const show = !(v.team !== this.me && !this.sees(fx, fz) && !this.sees(e.x, e.z));
         const y0 = this.baseY(fx, fz), y1 = this.baseY(e.x, e.z);
         if (show) {
           sfx('step');
@@ -932,7 +943,7 @@ export class View {
           case 'heal':
           case 'layOnHands':
             if (e.x !== v.x || e.z !== v.z) {
-              await this.projectile(this.from(v, 1.1), new THREE.Vector3(e.x, 1.0 + this.baseY(e.x, e.z), e.z), v.team === 'gob' ? 'hex' : 'light');
+              await this.projectile(this.from(v, 1.1), new THREE.Vector3(e.x, 1.0 + this.baseY(e.x, e.z), e.z), v.cls === 'shaman' ? 'hex' : 'light');
             }
             break;
           case 'turret':
@@ -1035,7 +1046,7 @@ export class View {
         } else sfx('smash');
         return;
       case 'trap':
-        this.setTrap(e.x, e.z, e.on);
+        this.setTrap(e.x, e.z, e.on && this.ownTrap(s.tiles[e.z][e.x].trap));
         if (e.sprung) {
           sfx('smash');
           this.floatText(new THREE.Vector3(e.x, 1.8, e.z), 'Snap!', '#c9a26b');
@@ -1066,7 +1077,7 @@ export class View {
       }
       this.setFire(x, z, s.tiles[z][x].fire > 0);
       this.setTower(x, z, !!s.tiles[z][x].tower);
-      this.setTrap(x, z, !!s.tiles[z][x].trap);
+      this.setTrap(x, z, this.ownTrap(s.tiles[z][x].trap));
     }
     for (const u of s.units) {
       let v = this.units.get(u.id);
@@ -1126,8 +1137,9 @@ export class View {
     const vfov = (this.camera.fov * Math.PI) / 180;
     const hfov = 2 * Math.atan(Math.tan(vfov / 2) * this.camera.aspect);
     const d = Math.max((this.size + 1) / 2 / Math.tan(hfov / 2), ((this.size - 1) / 2 / Math.tan(vfov / 2)) * 1.2, 11);
-    const dir = new THREE.Vector3(0, 0.86, 0.51).normalize();
-    this.controls.target.set(mid, 0, mid + (w < h ? 1.8 : 0.8));
+    const f = this.me === 'gob' ? -1 : 1; // the far squad in a Duel looks from the other end
+    const dir = new THREE.Vector3(0, 0.86, 0.51 * f).normalize();
+    this.controls.target.set(mid, 0, mid + (w < h ? 1.8 : 0.8) * f);
     this.camera.position.copy(this.controls.target).addScaledVector(dir, d);
     this.controls.maxDistance = Math.max(34, d * 1.3);
     this.controls.update();
@@ -1137,7 +1149,7 @@ export class View {
   lookHome() {
     const w = this.app.clientWidth, h = this.app.clientHeight;
     const mid = (this.size - 1) / 2;
-    return this.lookAt(mid, mid + (w < h ? 1.8 : 0.8), 0.5);
+    return this.lookAt(mid, mid + (w < h ? 1.8 : 0.8) * (this.me === 'gob' ? -1 : 1), 0.5);
   }
 
   // Swing the camera over to a spot (used to follow goblins in their turn)

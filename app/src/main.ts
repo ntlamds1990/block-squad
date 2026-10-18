@@ -1,21 +1,23 @@
 // The game screen: turns taps into rule actions, plays the results on the 3D view, runs the
 // goblins' turn, and saves after every move.
 import './style.css';
-import { BALANCE, CLASSES, DEFAULT_SQUAD, HERO_CLASSES, NAME_POOL, PATHS, PATHS_OF, PROGRESS, type AbilityDef, type Difficulty, type HeroClass, type PathId } from './rules/balance';
+import { BALANCE, CLASSES, DEFAULT_SQUAD, HERO_CLASSES, NAME_POOL, PATHS, PATHS_OF, PROGRESS, type AbilityDef, type Difficulty, type HeroClass, type PathId, type Team } from './rules/balance';
 import type { GameEvent, GameState, Theme, Unit } from './rules/types';
 import {
   abilityOf, abilityReady, abilityTargets, area3, attackTargets, buildCells, canAttackFrom, canSee, cdOf, classLabel, createGame, def,
-  digTargets, endEnemyTurn, endPlayerTurn, hAt, hitInfo, iceWallCells, key, living, moveAttackOption, moveAttackTargets, moveTiles, near8,
-  pathTo, moveAttackTiles, performAbility, performAttack, performDig, performGuard, performMove, performMoveAttack, rangeFrom, reach, reachFrom,
+  digTargets, hAt, hitInfo, iceWallCells, key, living, moveAttackOption, moveAttackTargets, moveTiles, near8,
+  pathTo, moveAttackTiles, rangeFrom, reach, reachFrom,
   tileAt, unitAt, unitById, heroMaxHp, extraGoblins, coverAt, type PathNode, type Slot, type SquadMember
 } from './rules/game';
 import {
-  applyBattle, canPromote, ensureSquad, heroLabel, levelOf, newCampaign, nextLevelXp, parseCampaign, promote, recruit,
+  applyBattle, applyDuel, canPromote, ensureSquad, heroLabel, levelOf, newCampaign, nextLevelXp, parseCampaign, promote, recruit,
   squadMembers, toggleSquad, type BattleReport, type Campaign, type HeroRecord,
   SLOTS, buy, equip, gearList, sell, unequip
 } from './rules/campaign';
 import { FORGE, ICON, ITEMS, LOOT, RARITY_LABEL, fits, sellPrice, withGear, type GearSlot, type ItemId } from './rules/items';
-import { applyAction, chooseAction, turnOrder } from './rules/ai';
+import { chooseAction, turnOrder } from './rules/ai';
+import { actAllowed, applyAct, controls, playersTurn, sideHasMoves, stateHash, teamOf, type Act } from './rules/match';
+import { Link, cleanCode, newRoomCode } from './net/link';
 import { deserialize, serialize } from './rules/save';
 import { View } from './render/view';
 import { isMusicOn, isMuted, play, setMusic, setMusicOn, setMuted, unlockAudio } from './ui/audio';
@@ -26,6 +28,8 @@ const SAVE_KEY = 'blockSquad.save';
 const SQUAD_KEY = 'blockSquad.squad';
 const SETUP_KEY = 'blockSquad.setup';
 const CAMPAIGN_KEY = 'blockSquad.campaign';
+const MATCH_KEY = 'blockSquad.match';
+const NAME_KEY = 'blockSquad.name';
 
 const view = new View($('app'), $<HTMLCanvasElement>('scene'), $('labels'));
 
@@ -45,26 +49,61 @@ const U = {
   plan: null as { path: { x: number; z: number }[]; end: { x: number; z: number } } | null,
   inspect: null as string | null,
   busy: false,
+  waiting: 0, // the phone that joined: a move sent to the host, not back yet
   flags: new Set<string>()
 };
 
 const coach = new Coach($('coach'), $('coachText'), $('coachOk'), $('coachSkip'), () => renderAll());
 const sel = (): Unit | null => (U.sel ? unitById(s, U.sel) : null);
-const myTurn = () => s.phase === 'player' && !U.busy;
-const isOver = () => s.phase === 'over';
 const modeSlot = (): Slot => (U.mode === 'extra' ? 2 : 1);
 const inAbilityMode = () => U.mode === 'ability' || U.mode === 'extra';
+
+/* ---------- Whose eyes: solo, or one of two phones ---------- */
+
+// net.seat is this phone's player number in a two-phone game (0 made the room, 1 joined)
+const net = {
+  link: null as Link | null,
+  code: '',
+  seat: undefined as number | undefined,
+  nonce: 0,
+  partner: '',
+  tries: 0,
+  left: false // the other player went back to the menu
+};
+const host = () => !s.match || !net.link || net.link.host;
+const ME = (): Team => teamOf(s, net.seat);
+const FOE = (): Team => (ME() === 'hero' ? 'gob' : 'hero');
+const isMine = (u: Unit) => controls(s, net.seat, u);
+const myUnits = () => s.units.filter(isMine);
+const partnerName = () => (s.match && net.seat !== undefined ? s.match.names[1 - net.seat] : net.partner) || 'Your friend';
+const linked = () => !s.match || !!net.link?.connected;
+const myTurn = () => playersTurn(s, net.seat) && !U.busy && !U.waiting && linked();
+const foeWord = (n = 1) => (s.mode === 'duel' ? (n === 1 ? 'enemy' : 'enemies') : n === 1 ? 'goblin' : 'goblins');
 
 /* ---------- Saving ---------- */
 
 function save() {
   try {
+    if (s.match) {
+      if (s.phase === 'over') localStorage.removeItem(MATCH_KEY);
+      else localStorage.setItem(MATCH_KEY, JSON.stringify({ v: 1, code: net.code, seat: net.seat, state: serialize(s) }));
+      return;
+    }
     if (s.phase === 'over') localStorage.removeItem(SAVE_KEY);
     else localStorage.setItem(SAVE_KEY, serialize(s));
   } catch { /* storage full or private mode: play on without saving */ }
 }
 function loadSave(): GameState | null {
   try { return deserialize(localStorage.getItem(SAVE_KEY)); } catch { return null; }
+}
+interface SavedMatch { code: string; seat: number; state: GameState }
+function loadMatch(): SavedMatch | null {
+  try {
+    const d = JSON.parse(localStorage.getItem(MATCH_KEY) || 'null');
+    const st = d && deserialize(d.state);
+    if (!st || !st.match || (d.seat !== 0 && d.seat !== 1) || typeof d.code !== 'string') return null;
+    return { code: d.code, seat: d.seat, state: st };
+  } catch { return null; }
 }
 
 /* ---------- Turn flow ---------- */
@@ -81,105 +120,178 @@ async function animate(ev: GameEvent[]) {
   await view.animate(ev, s);
 }
 
-async function run(fn: () => Promise<void>) {
-  U.busy = true;
-  renderAll();
-  try { await fn(); } finally { U.busy = false; }
+// Moves are played one at a time, in order, on both phones
+let chain: Promise<void> = Promise.resolve();
+function enqueue(fn: () => Promise<void>): Promise<void> {
+  chain = chain.then(fn).catch(e => console.error(e));
+  return chain;
 }
 
-function startPlayerTurn() {
+function resetUi() {
   U.mode = 'move';
   U.pending = null;
   U.plan = null;
   U.inspect = null;
-  U.sel = living(s, 'hero').find(h => h.ap > 0)?.id ?? null;
-  banner('Your turn');
-  play('turn');
-  view.lookHome();
-  save();
-  renderAll();
 }
 
-async function afterHeroAction() {
-  setTurnLog('');
-  U.pending = null;
-  U.plan = null;
-  U.inspect = null;
-  U.mode = 'move';
-  save();
-  if (checkEnd()) return;
-  const u = sel();
-  if (u && (!u.alive || u.ap <= 0)) U.sel = living(s, 'hero').find(h => h.ap > 0)?.id ?? null;
-  renderAll();
-  if (!living(s, 'hero').some(h => h.ap > 0)) {
-    await view.wait(0.5);
-    enemyTurn(false);
+// Every move this phone makes goes through here. Solo, or on the phone hosting a two-phone game,
+// the move happens now; the phone that joined sends it to the host and waits for it to come back.
+async function act(a: Act) {
+  if (!actAllowed(s, a, net.seat ?? 0)) { resetUi(); renderAll(); return; }
+  if (!host()) {
+    if (!net.link?.connected) return;
+    const n = ++net.nonce;
+    U.waiting = n;
+    renderAll();
+    net.link.send({ t: 'act', a, n });
+    setTimeout(() => { if (U.waiting === n) { U.waiting = 0; renderAll(); } }, 8000);
+    return;
   }
+  await commit(a);
+  hostLoop();
 }
 
-async function enemyTurn(resume: boolean) {
-  if (U.busy && !resume) return;
-  if (!resume && s.phase !== 'player') return;
-  U.busy = true;
-  U.sel = null; U.pending = null; U.plan = null; U.inspect = null;
-  const log: GameEvent[] = [];
-  const animate = async (ev: GameEvent[]) => { log.push(...ev); await view.animate(ev, s); };
-  setTurnLog('');
-  try {
-    if (!resume) {
-      const ev = endPlayerTurn(s);
-      renderAll();
-      banner("Goblins' turn");
-      play('turn');
-      await view.wait(0.6);
-      await animate(ev);
-    } else renderAll();
-    for (const g of turnOrder(s, 'gob')) {
-      if (isOver()) break;
-      if (!g.alive || g.ap <= 0) continue;
-      if (canSee(s, 'hero', g)) await view.lookAt(g.x, g.z + 2);
-      for (let i = 0; i < 6 && g.alive && g.ap > 0 && !isOver(); i++) {
-        const before = g.ap;
-        const ev = applyAction(s, g, chooseAction(s, g));
-        await animate(ev);
-        if (g.ap >= before) g.ap = 0;
-      }
-      g.ap = 0;
-      save();
-      renderPanel();
-      if (!isOver()) await view.wait(0.2);
+// The host makes a move official: run it, tell the other phone, show it
+function commit(a: Act, n?: number, from?: number): Promise<void> {
+  return enqueue(async () => {
+    if (s.phase === 'over') return;
+    if (from !== undefined && !actAllowed(s, a, from)) { net.link?.send({ t: 'reject', n }); return; }
+    const before = s.phase;
+    const ev = applyAct(s, a);
+    if (s.match) {
+      s.match.seq++;
+      net.link?.send({ t: 'act', a, seq: s.match.seq, h: stateHash(s), n });
     }
-    if (!isOver()) await animate(endEnemyTurn(s));
+    save();
+    await showAct(a, ev, before);
+  });
+}
+
+// The phone that joined: a move came back from the host
+function received(m: { a: Act; seq: number; h: number; n?: number }) {
+  enqueue(async () => {
+    if (!s.match) return;
+    if (m.seq <= s.match.seq) return; // already have it
+    if (m.seq !== s.match.seq + 1) { net.link?.send({ t: 'resync' }); return; }
+    const before = s.phase;
+    const ev = applyAct(s, m.a);
+    s.match.seq = m.seq;
+    if (m.n && m.n === U.waiting) U.waiting = 0;
+    save();
+    await showAct(m.a, ev, before);
+    if (stateHash(s) !== m.h) net.link?.send({ t: 'resync' });
+  });
+}
+
+// The host plays whatever needs no person: ending a finished turn, and the goblins
+let looping = false, goblinNow: string | null = null;
+async function hostLoop() {
+  if (looping || !host()) return;
+  looping = true;
+  try {
+    for (let i = 0; i < 500 && s.phase !== 'over'; i++) {
+      const a = nextAutoAct();
+      if (!a) break;
+      await commit(a);
+    }
+  } finally { looping = false; }
+}
+function nextAutoAct(): Act | null {
+  if (s.phase === 'over') return null;
+  if (s.phase === 'player' || s.mode === 'duel') return sideHasMoves(s) ? null : { k: 'endSide' };
+  let g = goblinNow ? unitById(s, goblinNow) : null;
+  if (!g || !g.alive || g.ap <= 0) g = turnOrder(s, 'gob').find(u => u.ap > 0) ?? null;
+  if (!g) { goblinNow = null; return { k: 'endSide' }; }
+  goblinNow = g.id;
+  const a = chooseAction(s, g);
+  return { k: 'ai', id: g.id, a, r: s.rng.s };
+}
+
+// What the other side did since your last turn, for the line at the top
+let foeLog: GameEvent[] = [];
+let lastMover: string | null = null;
+
+async function showAct(a: Act, ev: GameEvent[], before: GameState['phase']) {
+  U.busy = true;
+  const mover = 'id' in a ? unitById(s, a.id) : null;
+  const theirs = a.k === 'endSide' || (mover && mover.team !== ME());
+  if (theirs) foeLog.push(...ev);
+  if (mover && isMine(mover)) { resetUi(); setTurnLog(''); }
+  renderAll();
+  try {
+    if (a.k === 'endSide') {
+      if (s.phase !== 'over' && s.phase !== before) {
+        turnBanner();
+        await view.wait(0.6);
+      }
+      await animate(ev);
+    } else {
+      if (mover && mover.id !== lastMover && mover.team !== ME()) {
+        lastMover = mover.id;
+        const v = view.units.get(mover.id);
+        if (v && !v.hidden) await view.lookAt(v.x, v.z + (ME() === 'gob' ? -2 : 2));
+      }
+      await animate(ev);
+      if (a.k === 'ai' && mover && mover.ap <= 0) await view.wait(0.2);
+    }
   } finally {
     U.busy = false;
   }
   if (checkEnd()) return;
-  setTurnLog(turnSummary(log));
-  startPlayerTurn();
+  if (a.k === 'endSide' && s.phase !== before && playersTurn(s, net.seat)) { startPlayerTurn(); return; }
+  const u = sel();
+  if (u && (!u.alive || u.ap <= 0 || !isMine(u))) U.sel = myUnits().find(h => h.ap > 0)?.id ?? null;
+  renderAll();
 }
 
-// A short "what happened" line after the goblins move
+function turnBanner() {
+  if (playersTurn(s, net.seat)) return;
+  banner(s.mode === 'duel' ? `${partnerName()}'s turn` : "Goblins' turn");
+  play('turn');
+}
+
+function startPlayerTurn() {
+  resetUi();
+  lastMover = null;
+  U.sel = myUnits().find(h => h.ap > 0)?.id ?? null;
+  banner('Your turn');
+  play('turn');
+  view.lookHome();
+  if (foeLog.length) setTurnLog(turnSummary(foeLog));
+  foeLog = [];
+  save();
+  renderAll();
+}
+
+function endMyTurn() {
+  if (!myTurn()) return;
+  unlockAudio();
+  act({ k: 'done', player: net.seat ?? 0 });
+}
+
+// A short "what happened" line after the other side moves
 function turnSummary(ev: GameEvent[]): string {
   const name = (id: string) => unitById(s, id)?.name ?? '';
-  const isHero = (id: string) => { const u = unitById(s, id); return !!u && u.team === 'hero' && !CLASSES[u.cls].structure; };
+  const isOurs = (id: string) => { const u = unitById(s, id); return !!u && u.team === ME() && !CLASSES[u.cls].structure; };
   const hurt = new Map<string, number>();
   const fell: string[] = [], bits: string[] = [];
   let misses = 0, summons = 0, smashed = 0, frozen = 0;
   for (const e of ev) {
-    if (e.t === 'damage' && isHero(e.id)) hurt.set(e.id, (hurt.get(e.id) ?? 0) + e.amount);
-    if (e.t === 'death' && isHero(e.id)) fell.push(name(e.id));
-    if (e.t === 'attack' && !e.hit && isHero(e.target)) misses++;
+    if (e.t === 'damage' && isOurs(e.id)) hurt.set(e.id, (hurt.get(e.id) ?? 0) + e.amount);
+    if (e.t === 'death' && isOurs(e.id)) fell.push(name(e.id));
+    if (e.t === 'attack' && !e.hit && isOurs(e.target)) misses++;
     if (e.t === 'summon') summons++;
     if (e.t === 'blockRemoved' && e.cause === 'smash') smashed++;
-    if (e.t === 'status' && e.status === 'thaw') frozen++;
+    if (e.t === 'status' && e.status === 'thaw' && !isOurs(e.id)) frozen++;
   }
   hurt.forEach((n, id) => { if (!fell.includes(name(id))) bits.push(`${esc(name(id))} lost ${n} ${n === 1 ? 'heart' : 'hearts'}`); });
   if (fell.length) bits.push(`<strong>${fell.map(esc).join(' and ')} fell</strong>`);
   if (misses) bits.push(`${misses} ${misses === 1 ? 'attack' : 'attacks'} only grazed`);
   if (summons) bits.push(`a Shaman summoned ${summons === 1 ? 'a goblin' : summons + ' goblins'}`);
   if (smashed) bits.push(`a Troll smashed ${smashed === 1 ? 'a wall' : smashed + ' walls'}`);
-  if (frozen) bits.push(`${frozen} frozen ${frozen === 1 ? 'goblin' : 'goblins'} skipped the turn`);
-  return `<b>Goblins' turn:</b> ${bits.length ? bits.join(', ') + '.' : 'they moved, but nobody was hurt.'}`;
+  if (frozen) bits.push(`${frozen} frozen ${foeWord(frozen)} skipped the turn`);
+  const who = s.mode === 'duel' ? `${esc(partnerName())}'s turn` : "Goblins' turn";
+  return `<b>${who}:</b> ${bits.length ? bits.join(', ') + '.' : 'they moved, but nobody was hurt.'}`;
 }
 function setTurnLog(html: string) {
   const el = $('turnLog');
@@ -189,28 +301,33 @@ function setTurnLog(html: string) {
 
 function checkEnd(): boolean {
   if (s.phase !== 'over') return false;
-  // Campaign results go to the Barracks first, before the finished battle's save is cleared
-  const report = s.mode === 'campaign' ? applyBattle(camp, s) : null;
-  if (report) saveCampaign();
+  // Results go to the Barracks first, before the finished battle's save is cleared
+  const report = s.mode === 'campaign' || s.mode === 'coop' ? applyBattle(camp, s, Math.random, net.seat) : null;
+  const duelGold = s.mode === 'duel' && net.seat !== undefined ? applyDuel(camp, s, net.seat) : null;
+  if (report || duelGold !== null) saveCampaign();
   save();
   U.sel = null;
   renderAll();
-  const won = s.winner === 'hero';
+  const won = s.winner === ME();
   play(won ? 'win' : 'lose');
-  coach.finishBattle();
+  if (!s.match) coach.finishBattle();
   if (won) view.celebrate();
-  setTimeout(() => showEnd(won, report), won ? 1500 : 900);
+  setTimeout(() => showEnd(won, report, duelGold), won ? 1500 : 900);
   return true;
 }
 
-function showEnd(won: boolean, report: BattleReport | null) {
-  const left = living(s, 'hero').length;
-  const total = s.units.filter(u => u.team === 'hero' && !CLASSES[u.cls].structure).length;
+function showEnd(won: boolean, report: BattleReport | null, duelGold: number | null) {
+  const left = living(s, ME()).length;
+  const total = s.units.filter(u => u.team === ME() && !CLASSES[u.cls].structure).length;
+  const friend = esc(partnerName());
   $('endTitle').textContent = won ? 'Victory!' : 'Defeat';
   const place = s.theme === 'forest' ? 'The Dark Forest' : 'The village';
-  $('endText').textContent = won
-    ? `${place} is safe. Your squad won in ${s.turn} ${s.turn === 1 ? 'turn' : 'turns'} with ${left} of ${total} heroes standing.`
-    : `The goblins hold ${place.toLowerCase()} this time. Regroup and try again.`;
+  const turns = `${s.turn} ${s.turn === 1 ? 'turn' : 'turns'}`;
+  $('endText').innerHTML = s.mode === 'duel'
+    ? (won ? `You beat ${friend} in ${turns} with ${left} of ${total} heroes standing.` : `${friend} won this time, in ${turns}. Rematch?`)
+    : won
+      ? `${place} is safe. ${s.mode === 'coop' ? `You and ${friend}` : 'Your squad'} won in ${turns} with ${left} of ${total} heroes standing.`
+      : `The goblins hold ${place.toLowerCase()} this time. Regroup and try again.`;
   const box = $('endReport');
   box.innerHTML = '';
   if (report) {
@@ -233,10 +350,13 @@ function showEnd(won: boolean, report: BattleReport | null) {
     if (report.potions.length) lines.push(`<div class="line">${report.potions.map(esc).join(', ')} drank ${report.potions.length === 1 ? 'a potion' : 'potions'} (used up).</div>`);
     if (report.freeRecruits.length) lines.push(`<div class="line">${report.freeRecruits.map(esc).join(', ')} joined the Barracks for free, so you have a full squad.</div>`);
     box.innerHTML = lines.join('');
-  } else if (s.mode !== 'campaign') {
+  } else if (s.mode === 'duel') {
+    box.innerHTML = `<div class="line">${duelGold ? `<span class="gold">+${duelGold} gold</span> for the winner. ` : ''}Duels are friendly: nobody is lost and no XP is earned.</div>`;
+  } else if (s.mode !== 'campaign' && s.mode !== 'coop') {
     box.innerHTML = '<div class="line">Practice battle: nobody was lost and no XP was earned.</div>';
   }
-  $('againBtn').textContent = s.mode === 'campaign' ? 'Back to camp' : 'Play again';
+  $('againBtn').textContent = s.mode === 'practice' ? 'Play again' : 'Back to camp';
+  $('rematchBtn').hidden = !s.match;
   setMusic('camp');
   $('end').hidden = false;
   $('againBtn').focus();
@@ -265,8 +385,8 @@ function planShots(u: Unit): { canHit: Unit[]; blocked: Unit[] } {
   const out = { canHit: [] as Unit[], blocked: [] as Unit[] };
   if (!U.plan || u.ap < 2) return out;
   const { x, z } = U.plan.end;
-  for (const e of living(s, 'gob')) {
-    if (!canSee(s, 'hero', e)) continue;
+  for (const e of living(s, FOE())) {
+    if (!canSee(s, ME(), e)) continue;
     if (canAttackFrom(s, u, e, x, z)) out.canHit.push(e);
     else if (def(u).range > 1 && Math.hypot(e.x - x, e.z - z) <= def(u).range + 0.01) out.blocked.push(e);
   }
@@ -284,28 +404,25 @@ function walkPlan() {
   if (!u || !plan || U.busy) return;
   U.plan = null;
   U.flags.add('moved');
-  run(async () => { await animate(performMove(s, u, plan.path)); }).then(afterHeroAction);
+  act({ k: 'move', id: u.id, path: plan.path });
 }
 
 async function confirmPending() {
   if (U.plan && !U.pending) { walkPlan(); return; }
   const p = U.pending, u = sel();
   if (!p || !u || U.busy) return;
-  await run(async () => {
-    if (p.kind === 'attack') {
-      U.flags.add('attacked');
-      await animate(performAttack(s, u, unitById(s, p.target)!));
-    } else if (p.kind === 'moveattack') {
-      U.flags.add('attacked'); U.flags.add('moved');
-      await animate(performMoveAttack(s, u, pathTo(p.node), unitById(s, p.target)!));
-    } else if (p.kind === 'dig') {
-      await animate(performDig(s, u, p.x, p.z));
-    } else {
-      U.flags.add('ability');
-      await animate(performAbility(s, u, p.x, p.z, p.slot));
-    }
-  });
-  afterHeroAction();
+  if (p.kind === 'attack') {
+    U.flags.add('attacked');
+    await act({ k: 'attack', id: u.id, target: p.target });
+  } else if (p.kind === 'moveattack') {
+    U.flags.add('attacked'); U.flags.add('moved');
+    await act({ k: 'moveattack', id: u.id, path: pathTo(p.node), target: p.target });
+  } else if (p.kind === 'dig') {
+    await act({ k: 'dig', id: u.id, x: p.x, z: p.z });
+  } else {
+    U.flags.add('ability');
+    await act({ k: 'ability', id: u.id, x: p.x, z: p.z, slot: p.slot });
+  }
 }
 
 function handleTap(x: number, z: number) {
@@ -313,20 +430,20 @@ function handleTap(x: number, z: number) {
   if (!myTurn()) return;
   const u = sel();
   const there = unitAt(s, x, z);
-  const visibleThere = there && canSee(s, 'hero', there) ? there : null;
+  const visibleThere = there && canSee(s, ME(), there) ? there : null;
   const p = U.pending;
   U.inspect = null;
   if (p && p.x === x && p.z === z) { confirmPending(); return; }
   if (U.plan && U.mode === 'move' && U.plan.end.x === x && U.plan.end.z === z) { walkPlan(); return; }
   if (u && inAbilityMode() && abilityTargets(s, u, modeSlot()).some(([ax, az]) => ax === x && az === z)) { setPendingAbility(x, z); return; }
   if (visibleThere && visibleThere === u && U.mode === 'move' && U.plan) { U.plan = null; renderAll(); return; }
-  if (visibleThere && visibleThere.team === 'hero' && !CLASSES[visibleThere.cls].structure) { play('click'); setSel(visibleThere.id); return; }
+  if (visibleThere && isMine(visibleThere)) { play('click'); setSel(visibleThere.id); return; }
   if (!u) {
     if (visibleThere) { U.inspect = visibleThere.id; renderAll(); }
     return;
   }
   if (inAbilityMode()) { U.mode = 'move'; U.pending = null; renderAll(); return; }
-  if (visibleThere && visibleThere.team === 'gob' && U.plan && planShots(u).canHit.includes(visibleThere)) {
+  if (visibleThere && visibleThere.team === FOE() && U.plan && planShots(u).canHit.includes(visibleThere)) {
     U.mode = 'attack';
     U.inspect = visibleThere.id;
     U.pending = { kind: 'moveattack', target: visibleThere.id, x, z, node: planNode(u) };
@@ -335,7 +452,7 @@ function handleTap(x: number, z: number) {
     renderAll();
     return;
   }
-  if (visibleThere && visibleThere.team === 'gob') {
+  if (visibleThere && visibleThere.team === FOE()) {
     U.plan = null;
     U.inspect = visibleThere.id;
     const direct = u.ap > 0 && canAttackFrom(s, u, visibleThere, u.x, u.z);
@@ -382,7 +499,7 @@ const INSPECT = '#9b6bff';
 
 // Shields on tiles that give cover against the nearest goblin the squad can see
 function coverShields(tiles: { x: number; z: number }[]): [number, number, number][] {
-  const gobs = living(s, 'gob').filter(g => canSee(s, 'hero', g));
+  const gobs = living(s, FOE()).filter(g => canSee(s, ME(), g));
   if (!gobs.length) return [];
   const out: [number, number, number][] = [];
   for (const t of tiles) {
@@ -397,7 +514,7 @@ function coverShields(tiles: { x: number; z: number }[]): [number, number, numbe
 function renderHighlights() {
   view.hlClear();
   view.setLines([]);
-  view.selected = s.phase === 'player' ? U.sel : null;
+  view.selected = playersTurn(s, net.seat) ? U.sel : null;
   view.inspected = U.inspect;
   const g = U.inspect ? unitById(s, U.inspect) : null;
   if (g && g.alive && myTurn()) {
@@ -420,8 +537,8 @@ function renderHighlights() {
     } else {
       attackTargets(s, u).forEach(t => view.hl(t.x, t.z, COL.attack, 0.6));
       // In range but a tall wall blocks the shot
-      if (def(u).range > 1) living(s, 'gob').forEach(e => {
-        if (canSee(s, 'hero', e) && !canAttackFrom(s, u, e, u.x, u.z) && Math.hypot(e.x - u.x, e.z - u.z) <= def(u).range + 0.01) view.hl(e.x, e.z, '#5a6080', 0.6);
+      if (def(u).range > 1) living(s, FOE()).forEach(e => {
+        if (canSee(s, ME(), e) && !canAttackFrom(s, u, e, u.x, u.z) && Math.hypot(e.x - u.x, e.z - u.z) <= def(u).range + 0.01) view.hl(e.x, e.z, '#5a6080', 0.6);
       });
     }
     if (!U.plan) moveAttackTargets(s, u).forEach(t => view.hl(t.x, t.z, COL.attack, 0.28));
@@ -444,7 +561,7 @@ function renderHighlights() {
     const slot = modeSlot();
     const ab = abilityOf(u, slot)!;
     const cells = abilityTargets(s, u, slot);
-    const foesNear = () => s.units.filter(g => g.alive && g.team === 'gob' && canSee(s, 'hero', g) && near8(u.x, u.z, g.x, g.z));
+    const foesNear = () => s.units.filter(g => g.alive && g.team === FOE() && canSee(s, ME(), g) && near8(u.x, u.z, g.x, g.z));
     switch (ab.key) {
       case 'spin':
         foesNear().forEach(g => view.hl(g.x, g.z, COL.attack, 0.7));
@@ -475,17 +592,17 @@ function renderHighlights() {
 function previews(): Map<string, number> {
   const out = new Map<string, number>();
   const u = sel(), p = U.pending;
-  if (!u || !p || s.phase !== 'player') return out;
+  if (!u || !p || !playersTurn(s, net.seat)) return out;
   if (p.kind === 'attack' || p.kind === 'moveattack') {
     const t = unitById(s, p.target)!;
     out.set(p.target, p.kind === 'attack' ? hitInfo(s, u, t).dmg : hitInfo(s, u, t, p.node.x, p.node.z, true).dmg);
   }
   if (p.kind === 'ability') {
     const ab = abilityOf(u, p.slot)!;
-    if (ab.key === 'spin') living(s, 'gob').filter(g => near8(u.x, u.z, g.x, g.z)).forEach(g => out.set(g.id, ab.amount!));
+    if (ab.key === 'spin') living(s, FOE()).filter(g => near8(u.x, u.z, g.x, g.z)).forEach(g => out.set(g.id, ab.amount!));
     if (ab.key === 'fireball' || ab.key === 'volley' || ab.key === 'blizzard' || ab.key === 'vines') {
       const cells = area3(s, p.x, p.z);
-      living(s, 'gob').filter(g => canSee(s, 'hero', g) && cells.some(([x, z]) => x === g.x && z === g.z)).forEach(g => out.set(g.id, ab.amount!));
+      living(s, FOE()).filter(g => canSee(s, ME(), g) && cells.some(([x, z]) => x === g.x && z === g.z)).forEach(g => out.set(g.id, ab.amount!));
     }
     if (ab.key === 'aimedShot') {
       const t = unitAt(s, p.x, p.z);
@@ -504,22 +621,23 @@ function hearts(u: Unit) {
 function renderPanel() {
   const roster = $('roster');
   roster.innerHTML = '';
-  s.units.filter(u => u.team === 'hero' && !CLASSES[u.cls].structure).forEach(u => {
+  s.units.filter(u => u.team === ME() && !CLASSES[u.cls].structure).forEach(u => {
     const b = document.createElement('button');
     b.type = 'button';
-    b.className = 'chip' + (u.id === U.sel ? ' sel' : '') + (u.alive ? '' : ' dead');
-    b.disabled = !u.alive || s.phase !== 'player';
+    const partners = s.mode === 'coop' && u.player !== net.seat;
+    b.className = 'chip' + (u.id === U.sel ? ' sel' : '') + (u.alive ? '' : ' dead') + (partners ? ' ally' : '');
+    b.disabled = !u.alive || partners || !playersTurn(s, net.seat);
     b.innerHTML = `<b>${esc(u.name)}</b><span class="cls">${classLabel(u)}${u.level && u.level > 1 ? ` <span class="lv">Lv${u.level}</span>` : ''}</span><span class="hearts">${hearts(u)}</span>` +
       `<span class="ap" aria-label="${u.ap} actions left"><i class="${u.ap > 0 ? 'on' : ''}"></i><i class="${u.ap > 1 ? 'on' : ''}"></i></span>`;
-    b.addEventListener('click', () => { unlockAudio(); if (myTurn() && u.alive) { play('click'); setSel(u.id); } });
+    b.addEventListener('click', () => { unlockAudio(); if (myTurn() && isMine(u)) { play('click'); setSel(u.id); } });
     roster.appendChild(b);
   });
 
   const u = sel();
   const mine = myTurn();
   const atk = $<HTMLButtonElement>('btnAttack'), abl = $<HTMLButtonElement>('btnAbility'), conf = $<HTMLButtonElement>('btnConfirm'), guard = $<HTMLButtonElement>('btnGuard');
-  $<HTMLButtonElement>('endTurn').disabled = !mine;
-  $('turn').innerHTML = `Turn ${s.turn}<small>${s.phase === 'enemy' ? 'Goblins are moving' : s.phase === 'over' ? 'Battle over' : 'Your move'}</small>`;
+  $<HTMLButtonElement>('endTurn').disabled = !mine || !myUnits().some(h => h.ap > 0);
+  $('turn').innerHTML = `Turn ${s.turn}<small>${turnWord()}</small>`;
   const xb = $<HTMLButtonElement>('btnExtra');
   if (u && u.alive) {
     const C = def(u), ab = abilityOf(u)!;
@@ -556,6 +674,13 @@ function renderPanel() {
   m.setAttribute('aria-label', isMuted() ? 'Sound off' : 'Sound on');
 }
 
+function turnWord(): string {
+  if (s.phase === 'over') return 'Battle over';
+  if (!playersTurn(s, net.seat)) return s.mode === 'duel' ? `${esc(partnerName())} is moving` : 'Goblins are moving';
+  if (s.mode === 'coop' && !myUnits().some(h => h.ap > 0)) return `${esc(partnerName())} is moving`;
+  return 'Your move';
+}
+
 function abilityStatus(u: Unit, slot: Slot): string {
   const ab = abilityOf(u, slot)!;
   const cd = cdOf(u, slot);
@@ -585,8 +710,11 @@ function esc(t: string) {
 }
 
 function hintText(): string {
-  if (s.phase === 'enemy') return 'The goblins are taking their turn…';
   if (s.phase === 'over') return 'Battle over.';
+  if (s.match && !linked()) return `Waiting for ${esc(partnerName())}'s phone to link up again…`;
+  if (!playersTurn(s, net.seat)) return s.mode === 'duel' ? `${esc(partnerName())} is taking their turn…` : 'The goblins are taking their turn…';
+  if (U.waiting) return 'Sending your move…';
+  if (s.mode === 'coop' && !myUnits().some(h => h.ap > 0)) return `Your heroes are done. Waiting for ${esc(partnerName())} to finish their turn…`;
   const u = sel();
   const g = U.inspect ? unitById(s, U.inspect) : null;
   if (g && g.alive && !U.pending) {
@@ -617,14 +745,14 @@ function hintText(): string {
       (burns ? ` <strong>Careful:</strong> this route walks through fire (-${burns}♥).` : '') + planShotText(u);
   }
   if (inAbilityMode()) { const ab = abilityOf(u, modeSlot())!; return ab.desc + (ab.key === 'spin' ? ' Press Cast! to spin.' : ' Tap a highlighted tile.'); }
-  if (U.mode === 'attack') return 'Tap a goblin on a red tile to aim.' + (u.cls === 'builder' ? ' Tap a brown block to dig it out.' : '');
+  if (U.mode === 'attack') return `Tap ${s.mode === 'duel' ? 'an enemy' : 'a goblin'} on a red tile to aim.` + (u.cls === 'builder' ? ' Tap a brown block to dig it out.' : '');
   if (u.ap <= 0) return `<strong>${esc(u.name)}</strong> ${u.guard ? 'is on Overwatch and will shoot the first goblin that moves into range.' : 'is done this turn.'} Pick another hero or end the turn.`;
-  return `<strong>${esc(u.name)}</strong> has ${u.ap} ${u.ap === 1 ? 'action' : 'actions'}. Tap a blue tile to plan a route and see who you can hit from there, or a goblin on a red tile to attack.` + (def(u).range > 1 ? ' Grey goblins are in range but behind a tall wall.' : '');
+  return `<strong>${esc(u.name)}</strong> has ${u.ap} ${u.ap === 1 ? 'action' : 'actions'}. Tap a blue tile to plan a route and see who you can hit from there, or ${s.mode === 'duel' ? 'an enemy' : 'a goblin'} on a red tile to attack.` + (def(u).range > 1 ? ' Grey goblins are in range but behind a tall wall.' : '');
 }
 
 function abilityHint(u: Unit, ab: AbilityDef, x: number, z: number): string {
-  const inArea = (cells: [number, number][], team: 'hero' | 'gob') =>
-    s.units.filter(o => o.alive && o.team === team && !CLASSES[o.cls].structure && (team === 'hero' || canSee(s, 'hero', o)) && cells.some(([cx, cz]) => cx === o.x && cz === o.z));
+  const inArea = (cells: [number, number][], team: Team) =>
+    s.units.filter(o => o.alive && o.team === team && !CLASSES[o.cls].structure && (team === ME() || canSee(s, ME(), o)) && cells.some(([cx, cz]) => cx === o.x && cz === o.z));
   const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : w.endsWith('o') ? 'es' : 's'}`;
   switch (ab.key) {
     case 'build': {
@@ -636,7 +764,7 @@ function abilityHint(u: Unit, ab: AbilityDef, x: number, z: number): string {
     case 'snare': return '<strong>Snare</strong>: hide a trap here. The first goblin to step on it takes ' + BALANCE.snare.damage + ' damage and stops. Costs 1 action.';
     case 'tnt': {
       const cells = area3(s, x, z);
-      const g = inArea(cells, 'gob').length, h = inArea(cells, 'hero').length;
+      const g = inArea(cells, FOE()).length, h = inArea(cells, ME()).length;
       return `<strong>TNT</strong> goes off after the goblins' turn: ${BALANCE.tnt.damage} damage to everyone around it. Right now that's ${plural(g, 'goblin')}` +
         (h ? ` and <strong>${plural(h, 'hero')}</strong> (move them away!)` : '') + '. Costs 1 action.';
     }
@@ -652,17 +780,17 @@ function abilityHint(u: Unit, ab: AbilityDef, x: number, z: number): string {
       return `<strong>Aimed Shot at ${esc(t.name)}</strong> ${t.hp}♥ · <span class="pct">${i.chance}% to hit</span> · Hit: -${i.dmg}, miss: -${BALANCE.graze}.`;
     }
     case 'spin': {
-      const n = living(s, 'gob').filter(g => near8(u.x, u.z, g.x, g.z)).length;
+      const n = living(s, FOE()).filter(g => near8(u.x, u.z, g.x, g.z)).length;
       return `<strong>${ab.name}</strong> hits ${plural(n, 'goblin')} for ${ab.amount}.`;
     }
     case 'iceWall': return `<strong>Ice Wall</strong>: ${plural(iceWallCells(s, u, x, z).length, 'tall ice block')} here, melting after ${ab.rounds ?? 3} turns.` + (ab.costsOneAction ? ' Costs 1 action.' : '');
     case 'vines': {
-      const n = inArea(area3(s, x, z), 'gob').length;
+      const n = inArea(area3(s, x, z), FOE()).length;
       return `<strong>Vines</strong> grab ${plural(n, 'goblin')}: ${ab.amount ?? 0} damage, and they can't move next turn.` + (ab.costsOneAction ? ' Costs 1 action.' : '');
     }
   }
   const cells = area3(s, x, z);
-  const hitG = inArea(cells, 'gob');
+  const hitG = inArea(cells, FOE());
   const n = hitG.length, kills = hitG.filter(g => g.hp <= ab.amount!).length;
   const blocks = cells.reduce((a, [cx, cz]) => a + (tileAt(s, cx, cz)!.blocks.includes('well') ? 0 : hAt(s, cx, cz)), 0);
   return `<strong>${ab.name}</strong> here hits ${plural(n, 'goblin')}` +
@@ -687,7 +815,8 @@ function renderAll() {
   view.setPreviews(previews());
   renderHighlights();
   renderPanel();
-  coach.update({ s, sel: sel(), flags: U.flags });
+  if (!s.match) coach.update({ s, sel: sel(), flags: U.flags });
+  renderNetBar();
 }
 
 /* ---------- Buttons ---------- */
@@ -733,12 +862,17 @@ $('btnExtra').addEventListener('click', () => {
 $('btnGuard').addEventListener('click', () => {
   const u = sel();
   if (!myTurn() || !u || u.ap <= 0) return;
-  run(async () => { await animate(performGuard(s, u)); }).then(afterHeroAction);
+  act({ k: 'guard', id: u.id });
 });
-$('endTurn').addEventListener('click', () => { unlockAudio(); enemyTurn(false); });
+$('endTurn').addEventListener('click', endMyTurn);
 $('centerBtn').addEventListener('click', () => view.fitCamera());
 $('muteBtn').addEventListener('click', () => { unlockAudio(); setMuted(!isMuted()); play('click'); renderPanel(); });
-$('menuBtn').addEventListener('click', () => { if (U.busy) return; save(); showStart(); });
+$('menuBtn').addEventListener('click', () => {
+  if (U.busy) return;
+  save();
+  if (s.match) leaveLink();
+  showStart();
+});
 
 /* ---------- Start, Barracks, setup and end screens ---------- */
 
@@ -768,7 +902,7 @@ function saveCampaign() {
 }
 let setupMode: 'campaign' | 'practice' = 'campaign';
 
-const overlays = ['start', 'camp', 'barracks', 'recruit', 'promote', 'fallen', 'gear', 'forge', 'setup', 'end'];
+const overlays = ['start', 'camp', 'barracks', 'recruit', 'promote', 'fallen', 'gear', 'forge', 'setup', 'together', 'lobby', 'end'];
 function showOnly(id: string | null) {
   for (const o of overlays) $(o).hidden = o !== id;
   setMusic(id === null ? 'battle' : 'camp');
@@ -791,9 +925,15 @@ function showStart() {
     const total = saved.units.filter(u => u.team === 'hero' && !CLASSES[u.cls].structure).length;
     $('saveInfo').textContent = `${saved.mode === 'campaign' ? 'Camp battle' : 'Practice'} · Turn ${saved.turn} · ${cap(saved.diff)} · ${saved.theme === 'forest' ? 'Dark Forest' : 'Village'} · ${n} of ${total} heroes standing`;
   }
+  const m = loadMatch();
+  $('continueTogetherBox').hidden = !m;
+  if (m) {
+    const other = m.state.match!.names[1 - m.seat];
+    $('matchInfo').textContent = `${m.state.mode === 'duel' ? 'Duel' : 'Co-op'} with ${other} · Turn ${m.state.turn} · ${m.state.theme === 'forest' ? 'Dark Forest' : 'Village'}`;
+  }
   if (!view.inCamp) campScene();
   showOnly('start');
-  (saved ? $('continueBtn') : $('newBtn')).focus();
+  (saved ? $('continueBtn') : m ? $('continueTogetherBtn') : $('newBtn')).focus();
 }
 const cap = (t: string) => t[0].toUpperCase() + t.slice(1);
 const heroHp = (h: HeroRecord) => heroMaxHp(h.cls, h.path, levelOf(h.xp), gearList(h));
@@ -1212,19 +1352,489 @@ $('startBtn').addEventListener('click', () => {
   try { localStorage.setItem(SQUAD_KEY, JSON.stringify(squad)); } catch { /* ignore */ }
   begin(createGame({ seed, diff: setup.diff, theme, squad: practiceSquad(), mode: 'practice' }));
 });
-$('againBtn').addEventListener('click', () => { if (s.mode === 'campaign') showCamp(); else showStart(); });
+$('againBtn').addEventListener('click', () => {
+  if (s.match) leaveLink();
+  if (s.mode === 'practice') showStart(); else showCamp();
+});
 
-function begin(state: GameState) {
+
+/* ---------- Play together: two phones ---------- */
+
+interface Lobby {
+  kind: 'coop' | 'duel';
+  theme: Theme | 'random';
+  diff: Difficulty;
+  fair: boolean;
+  names: [string, string];
+  picks: [SquadMember[], SquadMember[]];
+  ready: [boolean, boolean];
+}
+let lobby: Lobby | null = null;
+let lastLobby: Lobby | null = null; // the settings of the last game, for a rematch
+let myPicks: string[] = [];          // Barracks hero ids this phone brings
+let resumeMatch: SavedMatch | null = null; // set by Continue together
+
+const myName = () => ($<HTMLInputElement>('myName').value.trim().slice(0, 12) || 'Player');
+const pickCount = () => (lobby?.kind === 'duel' ? PROGRESS.squadSize : 2);
+const lobbySeat = () => (net.link?.host ? 0 : 1);
+
+function showTogether(note = '') {
+  try { $<HTMLInputElement>('myName').value = localStorage.getItem(NAME_KEY) || ''; } catch { /* ignore */ }
+  $('joinBox').hidden = true;
+  $('tgNote').innerHTML = note;
+  showOnly('together');
+}
+function rememberName() {
+  try { localStorage.setItem(NAME_KEY, myName()); } catch { /* ignore */ }
+}
+
+// Start talking to the other phone. `want`: make the room, join it, or whichever works (resuming)
+function startLink(code: string, want: 'host' | 'join' | 'either') {
+  if (net.link) net.link.stop();
+  net.left = false;
+  net.code = code;
+  net.tries = 0;
+  const link = new Link(code, {
+    message: m => onNetMessage(link, m as NetMsg),
+    open: () => onNetOpen(link),
+    close: () => onNetClose(link),
+    error: text => onNetError(link, text)
+  });
+  net.link = link;
+  link.start(want);
+}
+function leaveLink() {
+  if (!net.link) return;
+  net.link.send({ t: 'bye' });
+  const l = net.link;
+  net.link = null;
+  setTimeout(() => l.stop(), 300);
+}
+
+type NetMsg =
+  | { t: 'hello'; name: string; resume: { battleId?: number; seq: number; seat: number } | null }
+  | { t: 'lobby'; lobby: Lobby }
+  | { t: 'pick'; squad: SquadMember[]; ready: boolean }
+  | { t: 'start'; state: GameState; seat: number }
+  | { t: 'sendState' }
+  | { t: 'state'; state: GameState; seat: number }
+  | { t: 'act'; a: Act; n?: number; seq: number; h: number }
+  | { t: 'reject'; n?: number }
+  | { t: 'resync' }
+  | { t: 'rematch' }
+  | { t: 'bye' };
+
+// The game this phone would carry on with: the battle on screen, or the one picked from Continue together
+function currentMatch(): SavedMatch | null {
+  if (s.match && s.phase !== 'over' && $('end').hidden && net.seat !== undefined && inBattle()) return { code: net.code, seat: net.seat, state: s };
+  return resumeMatch;
+}
+const inBattle = () => overlays.every(o => $(o).hidden);
+
+function onNetOpen(link: Link) {
+  if (link !== net.link) return;
+  net.tries = 0;
+  net.left = false;
+  if (!link.host) {
+    const cur = currentMatch();
+    link.send({ t: 'hello', name: myName(), resume: cur ? { battleId: cur.state.battleId, seq: cur.state.match!.seq, seat: cur.seat } : null });
+  }
+  renderLobby();
+  renderNetBar();
+}
+
+function onNetClose(link: Link) {
+  if (link !== net.link) return;
+  renderNetBar();
+  if (!$('lobby').hidden) { $('lobbyStatus').innerHTML = `${esc(net.partner || 'The other phone')} left the room.`; renderLobby(); }
+  // In a battle, the phone that joined keeps trying to link up again; the host waits for it
+  if (s.match && inBattle() && !link.host) reconnectSoon();
+}
+
+function onNetError(link: Link, text: string) {
+  if (link !== net.link) return;
+  if (s.match && inBattle()) { reconnectSoon(); return; }
+  net.link = null;
+  link.stop();
+  showTogether(text);
+}
+
+let retryTimer = 0;
+function reconnectSoon() {
+  clearTimeout(retryTimer);
+  if (net.tries >= 6) { renderNetBar(); return; }
+  retryTimer = window.setTimeout(() => {
+    if (!s.match || !inBattle() || net.link?.connected) return;
+    net.tries++;
+    const tries = net.tries;
+    startLink(net.code, 'either');
+    net.tries = tries;
+    renderNetBar();
+  }, 1500 + net.tries * 1500);
+}
+
+function onNetMessage(link: Link, m: NetMsg) {
+  if (link !== net.link || !m || typeof m !== 'object') return;
+  switch (m.t) {
+    case 'hello': return gotHello(m);
+    case 'lobby':
+      if (link.host) return;
+      gotLobby(m.lobby);
+      return;
+    case 'pick':
+      if (!link.host || !lobby) return;
+      lobby.picks[1] = Array.isArray(m.squad) ? m.squad.slice(0, PROGRESS.squadSize) : [];
+      lobby.ready[1] = !!m.ready && lobby.picks[1].length === pickCount();
+      sendLobby();
+      maybeStartMatch();
+      return;
+    case 'start': {
+      if (link.host) return;
+      const st = m.state;
+      if (!st || !st.match) return;
+      // Same battle already on screen: just catch up
+      if (s.match && inBattle() && s.battleId === st.battleId && net.seat === m.seat) {
+        enqueue(async () => { s = st; view.load(s); U.waiting = 0; save(); renderAll(); if (playersTurn(s, net.seat) && !U.sel) startPlayerTurn(); });
+        return;
+      }
+      resumeMatch = null;
+      if (lobby) lastLobby = lobby;
+      lobby = null;
+      begin(st, m.seat);
+      return;
+    }
+    case 'sendState': {
+      const cur = currentMatch();
+      if (cur) link.send({ t: 'state', state: cur.state, seat: cur.seat });
+      return;
+    }
+    case 'state':
+      if (!link.host || !m.state?.match) return;
+      startMatch(m.state, 1 - m.seat);
+      return;
+    case 'act':
+      if (link.host) { if (s.match && net.seat !== undefined && inBattle()) commit(m.a, m.n, 1 - net.seat).then(hostLoop); }
+      else if (s.match && inBattle()) received(m);
+      return;
+    case 'reject':
+      if (m.n && m.n === U.waiting) { U.waiting = 0; resetUi(); renderAll(); banner("That move didn't work"); }
+      return;
+    case 'resync':
+      if (link.host && s.match && net.seat !== undefined) link.send({ t: 'start', state: s, seat: 1 - net.seat });
+      return;
+    case 'rematch':
+      if (link.host) openLobby(true);
+      return;
+    case 'bye':
+      net.partner = net.partner || partnerName();
+      net.left = true;
+      link.stop();
+      if (net.link === link) net.link = null;
+      if (!$('lobby').hidden) { $('lobbyStatus').innerHTML = `${esc(net.partner)} left the room.`; renderLobby(); }
+      renderNetBar();
+      return;
+  }
+}
+
+// The host: the other phone said hello. Carry on a game, or open the lobby for a new one.
+function gotHello(m: Extract<NetMsg, { t: 'hello' }>) {
+  net.partner = String(m.name || 'Player').slice(0, 12);
+  const mine = currentMatch(), theirs = m.resume;
+  if (mine) {
+    if (theirs && theirs.battleId === mine.state.battleId && theirs.seq > mine.state.match!.seq) { net.link?.send({ t: 'sendState' }); return; }
+    startMatch(mine.state, mine.seat);
+    return;
+  }
+  openLobby(false);
+}
+
+// Host: send the game to the other phone and play it here too
+function startMatch(state: GameState, mySeat: number) {
+  net.link?.send({ t: 'start', state, seat: 1 - mySeat });
+  resumeMatch = null;
+  if (lobby) lastLobby = lobby;
+  lobby = null;
+  if (s === state && inBattle()) { renderAll(); hostLoop(); return; }
+  begin(state, mySeat);
+}
+
+function defaultPicks(n: number): string[] {
+  const order = [...camp.squad, ...camp.heroes.map(h => h.id).filter(id => !camp.squad.includes(id))];
+  return order.filter(id => camp.heroes.some(h => h.id === id)).slice(0, n);
+}
+const pickedMembers = (): SquadMember[] => squadMembers({ ...camp, squad: myPicks });
+
+function openLobby(rematch: boolean) {
+  const old = lobby ?? lastLobby;
+  lobby = {
+    kind: old?.kind ?? 'coop', theme: old?.theme ?? setup.theme, diff: old?.diff ?? setup.diff, fair: old?.fair ?? false,
+    names: [myName(), net.partner || 'Player'], picks: [[], []], ready: [false, false]
+  };
+  myPicks = defaultPicks(pickCount());
+  lobby.picks[0] = pickedMembers();
+  if (rematch || old) $('lobbyStatus').innerHTML = '';
+  sendLobby();
+  showLobby();
+}
+function sendLobby() {
+  if (net.link?.host && lobby) net.link.send({ t: 'lobby', lobby });
+  renderLobby();
+}
+function gotLobby(l: Lobby) {
+  const kindChanged = !lobby || lobby.kind !== l.kind;
+  lobby = l;
+  net.partner = l.names[0];
+  if (kindChanged || myPicks.length !== pickCount() || !myPicks.every(id => camp.heroes.some(h => h.id === id))) myPicks = defaultPicks(pickCount());
+  // New game type: tell the host which heroes we bring now
+  if (kindChanged || l.picks[1].length !== myPicks.length) net.link?.send({ t: 'pick', squad: pickedMembers(), ready: l.ready[1] });
+  if ($('lobby').hidden) showLobby();
+  else renderLobby();
+}
+
+function showLobby() {
+  showOnly('lobby');
+  renderLobby();
+}
+
+function renderLobby() {
+  const link = net.link;
+  const host = !!link?.host;
+  const code = net.code;
+  $('roomCode').textContent = code;
+  const connected = !!link?.connected;
+  $('lobbyWait').hidden = connected && !!lobby;
+  $('lobbySetup').hidden = !lobby || !connected;
+  if (!connected || !lobby) {
+    $('lobbyStatus').innerHTML ||= host || !link
+      ? `On the other phone, tap <strong>Play together</strong>, then <strong>Join a game</strong>, and type <strong>${code}</strong>.`
+      : 'Linking up with the other phone…';
+    return;
+  }
+  const seat = lobbySeat(), other = 1 - seat;
+  const n = pickCount();
+  $('lobbyTitle').textContent = `${lobby.names[0]} and ${lobby.names[1]}`;
+  // Settings: the phone that made the room chooses
+  document.querySelectorAll<HTMLButtonElement>('[data-kind]').forEach(b => {
+    b.classList.toggle('on', b.dataset.kind === lobby!.kind);
+    b.disabled = !host;
+  });
+  document.querySelectorAll<HTMLButtonElement>('[data-lmap]').forEach(b => {
+    b.classList.toggle('on', b.dataset.lmap === lobby!.theme);
+    b.disabled = !host;
+  });
+  document.querySelectorAll<HTMLButtonElement>('[data-ldiff]').forEach(b => {
+    b.classList.toggle('on', b.dataset.ldiff === lobby!.diff);
+    b.disabled = !host;
+  });
+  $('lobbyDiffBox').hidden = lobby.kind !== 'coop';
+  $('fairBox').hidden = lobby.kind !== 'duel';
+  $<HTMLInputElement>('fairToggle').checked = lobby.fair;
+  $<HTMLInputElement>('fairToggle').disabled = !host;
+  $('kindNote').textContent = lobby.kind === 'coop'
+    ? 'Team up against the goblins. You each bring 2 heroes and move them in the same turn. It counts like a camp battle: XP, gold and a loot chest each, and heroes who fall are gone for good.'
+    : `Your squad against ${lobby.names[other]}'s, taking turns. A coin flip picks who goes first. Nobody is lost and no XP is earned; the winner gets ${PROGRESS.gold.duelWin} gold.` +
+      (lobby.fair ? ' Fair fight: everyone is a level 1 hero with no gear.' : '');
+  if (!host) $('lobbyHostNote').textContent = `${lobby.names[0]} picks the game and the map.`;
+  $('lobbyHostNote').hidden = host;
+  // Hero picks
+  $('lobbyPickLbl').textContent = `Bring ${n} heroes from your Barracks (${myPicks.length} of ${n})`;
+  $('lobbyHeroes').innerHTML = camp.heroes.map(h => {
+    const i = myPicks.indexOf(h.id);
+    return `<div class="heroCard${i >= 0 ? ' picked' : ''}" role="button" tabindex="0" aria-pressed="${i >= 0}" data-lpick="${h.id}">` +
+      `<b>${esc(h.name)}</b><span class="cls">Level ${levelOf(h.xp)} ${heroLabel(h)}</span>` +
+      `<span class="stats"><span class="f">♥</span>${heroHp(h)}</span>` +
+      `<span class="gearRow">${gearList(h).map(id => `<span>${ICON[id]}</span>`).join('')}</span>` +
+      (i >= 0 ? `<span class="num">${i + 1}</span>` : '') + '</div>';
+  }).join('');
+  const theirs = lobby.picks[other];
+  $('lobbyPeer').innerHTML = `<strong>${esc(lobby.names[other])}</strong>: ` +
+    (theirs.length ? theirs.map(m => `${esc(m.name)} <small>(${heroLabel(m)})</small>`).join(', ') : 'picking heroes…') +
+    (lobby.ready[other] ? ' · <span class="ok">Ready!</span>' : '');
+  const ready = lobby.ready[seat];
+  const rb = $<HTMLButtonElement>('lobbyReady');
+  rb.disabled = myPicks.length !== n;
+  rb.textContent = ready ? `Waiting for ${lobby.names[other]}…` : lobby.ready[other] ? "Ready! Let's go" : 'Ready';
+  rb.classList.toggle('on', ready);
+  $('lobbyStatus').innerHTML = '';
+}
+
+function lobbyChanged() {
+  if (!lobby || !net.link?.host) return;
+  lobby.ready = [false, false];
+  sendLobby();
+}
+document.querySelectorAll<HTMLButtonElement>('[data-kind]').forEach(b => b.addEventListener('click', () => {
+  if (!lobby || !net.link?.host) return;
+  play('click');
+  lobby.kind = b.dataset.kind as Lobby['kind'];
+  myPicks = defaultPicks(pickCount());
+  lobby.picks = [pickedMembers(), []];
+  lobbyChanged();
+}));
+document.querySelectorAll<HTMLButtonElement>('[data-lmap]').forEach(b => b.addEventListener('click', () => {
+  if (!lobby || !net.link?.host) return;
+  play('click');
+  lobby.theme = b.dataset.lmap as Lobby['theme'];
+  lobbyChanged();
+}));
+document.querySelectorAll<HTMLButtonElement>('[data-ldiff]').forEach(b => b.addEventListener('click', () => {
+  if (!lobby || !net.link?.host) return;
+  play('click');
+  lobby.diff = b.dataset.ldiff as Difficulty;
+  lobbyChanged();
+}));
+$('fairToggle').addEventListener('change', () => {
+  if (!lobby || !net.link?.host) return;
+  lobby.fair = $<HTMLInputElement>('fairToggle').checked;
+  lobbyChanged();
+});
+$('lobbyHeroes').addEventListener('click', e => {
+  const card = (e.target as HTMLElement).closest<HTMLElement>('[data-lpick]');
+  if (!card || !lobby) return;
+  play('click');
+  const id = card.dataset.lpick!;
+  if (myPicks.includes(id)) myPicks = myPicks.filter(x => x !== id);
+  else if (myPicks.length < pickCount()) myPicks.push(id);
+  sendPicks(false);
+});
+function sendPicks(ready: boolean) {
+  if (!lobby) return;
+  const seat = lobbySeat();
+  lobby.picks[seat] = pickedMembers();
+  lobby.ready[seat] = ready;
+  if (net.link?.host) { sendLobby(); maybeStartMatch(); }
+  else { net.link?.send({ t: 'pick', squad: lobby.picks[seat], ready }); renderLobby(); }
+}
+$('lobbyReady').addEventListener('click', () => {
+  if (!lobby) return;
+  unlockAudio();
+  play('click');
+  sendPicks(!lobby.ready[lobbySeat()]);
+});
+$('lobbyLeave').addEventListener('click', () => {
+  play('click');
+  leaveLink();
+  lobby = null;
+  showTogether();
+});
+
+// Host: both players are ready, so make the battle
+function maybeStartMatch() {
+  if (!lobby || !net.link?.host || !lobby.ready[0] || !lobby.ready[1]) return;
+  const n = pickCount();
+  if (lobby.picks[0].length !== n || lobby.picks[1].length !== n) return;
+  const seed = (Math.random() * 2 ** 31) >>> 0;
+  const theme: Theme = lobby.theme === 'random' ? (Math.random() < 0.5 ? 'village' : 'forest') : lobby.theme;
+  const clean = (m: SquadMember, player: number): SquadMember => {
+    const base = { cls: m.cls, name: String(m.name).slice(0, 14), player };
+    return lobby!.fair ? base : { ...base, path: m.path, level: m.level, heroId: m.heroId, gear: m.gear };
+  };
+  let state: GameState;
+  if (lobby.kind === 'coop') {
+    const squad = [...lobby.picks[0].map(m => clean(m, 0)), ...lobby.picks[1].map(m => clean(m, 1))];
+    state = createGame({ seed, diff: lobby.diff, theme, squad, mode: 'coop', match: { names: lobby.names, teams: ['hero', 'hero'], seq: 0 } });
+  } else {
+    // Coin flip: who goes first (and starts at the near end of the map)
+    const first = Math.random() < 0.5 ? 0 : 1;
+    const teams: [Team, Team] = first === 0 ? ['hero', 'gob'] : ['gob', 'hero'];
+    state = createGame({
+      seed, diff: 'normal', theme, mode: 'duel', squad: lobby.picks[first].map(m => clean(m, first)),
+      squad2: lobby.picks[1 - first].map(m => clean(m, 1 - first)), match: { names: lobby.names, teams, seq: 0, fair: lobby.fair }
+    });
+  }
+  startMatch(state, 0);
+}
+
+$('togetherBtn').addEventListener('click', () => { unlockAudio(); play('click'); resumeMatch = null; showTogether(); });
+$('togetherBack').addEventListener('click', () => { play('click'); showStart(); });
+$('hostBtn').addEventListener('click', () => {
+  unlockAudio();
+  play('click');
+  rememberName();
+  resumeMatch = null;
+  lobby = null;
+  $('lobbyStatus').innerHTML = '';
+  startLink(newRoomCode(), 'host');
+  showLobby();
+});
+$('joinOpenBtn').addEventListener('click', () => {
+  play('click');
+  $('joinBox').hidden = false;
+  $<HTMLInputElement>('joinCode').focus();
+});
+$('joinCode').addEventListener('input', () => {
+  const inp = $<HTMLInputElement>('joinCode');
+  inp.value = cleanCode(inp.value);
+});
+$('joinCode').addEventListener('keydown', e => { if (e.key === 'Enter') $('joinBtn').click(); });
+$('joinBtn').addEventListener('click', () => {
+  unlockAudio();
+  const code = cleanCode($<HTMLInputElement>('joinCode').value);
+  if (code.length !== 4) { $('tgNote').textContent = 'Room codes are 4 letters.'; return; }
+  play('click');
+  rememberName();
+  resumeMatch = null;
+  lobby = null;
+  $('lobbyStatus').innerHTML = '';
+  startLink(code, 'join');
+  showLobby();
+});
+$('continueTogetherBtn').addEventListener('click', () => {
+  unlockAudio();
+  const m = loadMatch();
+  if (!m) { showStart(); return; }
+  play('click');
+  resumeMatch = m;
+  lobby = null;
+  $('lobbyStatus').innerHTML = `Linking up to carry on with ${esc(m.state.match!.names[1 - m.seat])}. On the other phone, tap <strong>Continue together</strong>, or <strong>Play together</strong> and join <strong>${m.code}</strong>.`;
+  startLink(m.code, 'either');
+  showLobby();
+});
+$('rematchBtn').addEventListener('click', () => {
+  play('click');
+  if (!net.link?.connected) { $('rematchBtn').textContent = 'The other phone left'; return; }
+  if (net.link.host) openLobby(true);
+  else net.link.send({ t: 'rematch' });
+});
+
+// The strip at the top of a two-phone battle while the link is down
+function renderNetBar() {
+  const bar = $('netBar');
+  const down = !!s.match && inBattle() && s.phase !== 'over' && !net.link?.connected;
+  bar.hidden = !down;
+  if (!down) return;
+  const giving = (net.tries >= 6 && !net.link?.host) || net.left;
+  $('netText').textContent = net.left
+    ? `${partnerName()} left the battle. It's saved, so you can both carry on later with Continue together.`
+    : giving
+    ? `Can't reach ${partnerName()}'s phone. Check the Wi-Fi on both phones.`
+    : net.link?.host ? `Waiting for ${partnerName()}'s phone to link up again…` : `Lost the link to ${partnerName()}'s phone. Reconnecting…`;
+  $('netRetry').hidden = !giving;
+}
+$('netRetry').addEventListener('click', () => { net.tries = 0; net.left = false; startLink(net.code, 'either'); renderNetBar(); });
+
+function begin(state: GameState, seat?: number) {
   s = state;
+  net.seat = s.match ? seat : undefined;
+  if (!s.match) leaveLink();
   U.flags = new Set();
   U.busy = false;
+  U.waiting = 0;
+  foeLog = [];
+  goblinNow = null;
+  lastMover = null;
   showOnly(null);
+  view.me = ME();
+  view.seat = s.mode === 'coop' ? net.seat : undefined;
   view.load(s);
   save();
-  if (s.phase === 'enemy') { enemyTurn(true); return; }
   if (checkEnd()) return;
-  startPlayerTurn();
+  if (playersTurn(s, net.seat)) startPlayerTurn();
+  else { resetUi(); U.sel = null; turnBanner(); renderAll(); }
+  hostLoop();
 }
+
+try { $<HTMLInputElement>('myName').value = localStorage.getItem(NAME_KEY) || ''; } catch { /* ignore */ }
 
 // The board behind the start screen
 view.load(s);
@@ -1237,6 +1847,6 @@ if ('serviceWorker' in navigator && import.meta.env.PROD) {
 
 // Hooks for automated browser tests
 (window as unknown as { __blockSquad: unknown }).__blockSquad = {
-  state: () => s, ui: U, view, handleTap, confirmPending, endTurn: () => enemyTurn(false), coach,
+  state: () => s, ui: U, view, handleTap, confirmPending, endTurn: endMyTurn, coach, net, act, hash: () => stateHash(s),
   screenPos: (x: number, z: number) => view.screenPos(x, z)
 };

@@ -2,17 +2,23 @@
 // which return a list of events for the screen to animate. The CPU, the tests and (later) two-phone
 // play all use the same rules.
 import { BALANCE, CLASSES, PATHS, PROGRESS, type AbilityDef, type ClassDef, type ClassId, type Difficulty, type GoblinClass, type HeroClass, type PathId, type Team } from './balance';
-import { BURNABLE, type AttackKind, type GameEvent, type GameState, type Theme, type Tile, type Unit } from './types';
+import { BURNABLE, type AttackKind, type GameEvent, type GameMode, type GameState, type MatchInfo, type Theme, type Tile, type Unit } from './types';
 import { makeRng, next, shuffle } from './rng';
 import { generateLayout, layoutToTiles } from './map';
 import { ITEMS, gearMod, withGear, type ItemId } from './items';
+
+export const GOBLIN_CLASSES: readonly GoblinClass[] = ['grunt', 'garcher', 'shaman', 'troll'];
 
 export const SIZE = 16;
 export const N4: ReadonlyArray<readonly [number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 export const key = (x: number, z: number) => x + ',' + z;
 
-export interface SquadMember { cls: HeroClass; name: string; path?: PathId; level?: number; heroId?: string; gear?: ItemId[] }
-export interface NewGameOptions { diff: Difficulty; theme: Theme; squad: SquadMember[]; seed: number; mode?: 'campaign' | 'practice' }
+export interface SquadMember { cls: HeroClass; name: string; path?: PathId; level?: number; heroId?: string; gear?: ItemId[]; player?: number }
+export interface NewGameOptions {
+  diff: Difficulty; theme: Theme; squad: SquadMember[]; seed: number; mode?: GameMode;
+  squad2?: SquadMember[]; // Duel: the squad on the goblins' side of the map
+  match?: MatchInfo;
+}
 
 /* ---------- Setup ---------- */
 
@@ -20,10 +26,13 @@ export function createGame(o: NewGameOptions): GameState {
   const rng = makeRng(o.seed);
   const tiles = layoutToTiles(generateLayout(rng, SIZE, o.theme));
   const s: GameState = { size: SIZE, theme: o.theme, diff: o.diff, tiles, units: [], turn: 1, phase: 'player', winner: null, rng, nextId: 1, mode: o.mode, battleId: o.seed };
+  if (o.match) s.match = o.match;
+  const extras = (m: SquadMember): HeroExtras => ({ path: m.path, level: m.level, heroId: m.heroId, gear: m.gear, player: m.player });
   const heroSpots = shuffle(rng, openSpots(s, SIZE - 3, SIZE - 1));
-  o.squad.forEach((m, i) => addUnit(s, m.cls, 'hero', heroSpots[i], m.name, undefined, { path: m.path, level: m.level, heroId: m.heroId, gear: m.gear }));
+  o.squad.forEach((m, i) => addUnit(s, m.cls, 'hero', heroSpots[i], m.name, undefined, extras(m)));
   const gobSpots = shuffle(rng, openSpots(s, 0, 2));
-  goblinRoster(o.diff, o.squad).forEach((c, i) => addUnit(s, c, 'gob', gobSpots[i]));
+  if (o.squad2) o.squad2.forEach((m, i) => addUnit(s, m.cls, 'gob', gobSpots[i], m.name, undefined, extras(m)));
+  else goblinRoster(o.diff, o.squad).forEach((c, i) => addUnit(s, c, 'gob', gobSpots[i]));
   startSide(s, 'hero');
   return s;
 }
@@ -50,7 +59,8 @@ function openSpots(s: GameState, z0: number, z1: number): [number, number][] {
   return out;
 }
 
-export interface HeroExtras { path?: PathId; level?: number; heroId?: string; gear?: ItemId[] }
+export interface HeroExtras { path?: PathId; level?: number; heroId?: string; gear?: ItemId[]; player?: number }
+export const isGoblin = (c: ClassId) => (GOBLIN_CLASSES as readonly string[]).includes(c);
 
 // Hearts for a hero: the class (or its promotion) plus any bonus from levelling up
 export function heroMaxHp(c: ClassId, path?: PathId, level = 1, gear: readonly ItemId[] = []): number {
@@ -63,7 +73,7 @@ export function heroMaxHp(c: ClassId, path?: PathId, level = 1, gear: readonly I
 export function addUnit(s: GameState, c: ClassId, team: Team, at: [number, number], name?: string, hp?: number, x?: HeroExtras): Unit {
   const C = CLASSES[c];
   const path = x?.path && PATHS[x.path]?.cls === c ? x.path : undefined;
-  const maxHp = hp ?? (team === 'gob' ? C.hp + BALANCE.difficulty[s.diff].goblinHpBonus : heroMaxHp(c, path, x?.level ?? 1, team === 'hero' ? x?.gear ?? [] : []));
+  const maxHp = hp ?? (isGoblin(c) ? C.hp + BALANCE.difficulty[s.diff].goblinHpBonus : heroMaxHp(c, path, x?.level ?? 1, x?.gear ?? []));
   const u: Unit = {
     id: (team === 'hero' ? 'h' : 'g') + s.nextId++, team, cls: c, name: name ?? C.label,
     x: at[0], z: at[1], hp: maxHp, maxHp, ap: 0, cd: 0, cd2: 0, alive: true, guard: false, summons: 0, kills: 0
@@ -71,7 +81,8 @@ export function addUnit(s: GameState, c: ClassId, team: Team, at: [number, numbe
   if (path) u.path = path;
   if (x?.level) u.level = x.level;
   if (x?.heroId) u.heroId = x.heroId;
-  if (team === 'hero' && x?.gear?.length) {
+  if (x?.player !== undefined) u.player = x.player;
+  if (!isGoblin(c) && x?.gear?.length) {
     u.gear = [...x.gear];
     const m = gearMod(u.gear);
     if (m.secondWind) u.secondWind = true;
@@ -92,6 +103,8 @@ export const unitById = (s: GameState, id: string) => s.units.find(u => u.id ===
 export const living = (s: GameState, team: Team) => s.units.filter(u => u.alive && u.team === team && !CLASSES[u.cls].structure);
 export const structures = (s: GameState, team: Team) => s.units.filter(u => u.alive && u.team === team && !!CLASSES[u.cls].structure);
 // Everything on the other side that can be attacked, Turrets included
+// Is this unit an enemy of whoever built a tower or set a trap? (Builders and Rangers are heroes, or the far squad in a Duel)
+export const foeOf = (s: GameState, ownerId: string, u: Unit) => (unitById(s, ownerId)?.team ?? 'hero') !== u.team;
 export const enemiesOf = (s: GameState, u: Unit) => s.units.filter(e => e.alive && e.team !== u.team);
 // A promoted hero's stats: the class with the path's changes on top
 export const PATH_DEFS = Object.fromEntries(
@@ -130,7 +143,7 @@ export function canSee(s: GameState, viewer: Team, u: Unit): boolean {
     return living(s, viewer).some(v => dist(v.x, v.z, u.x, u.z) <= BALANCE.stealthSight + 0.01);
   }
   if (s.theme !== 'forest') return true;
-  const r = viewer === 'hero' ? BALANCE.sight.forestHero : BALANCE.sight.forestGoblin;
+  const r = viewer === 'hero' || s.mode === 'duel' ? BALANCE.sight.forestHero : BALANCE.sight.forestGoblin;
   return living(s, viewer).some(v => dist(v.x, v.z, u.x, u.z) <= r + 0.01);
 }
 // A Ranger is hidden in the forest, or next to bushes, trees and logs
@@ -143,9 +156,9 @@ function hidden(s: GameState, u: Unit): boolean {
   return false;
 }
 
-export function heroSeesTile(s: GameState, x: number, z: number): boolean {
+export function heroSeesTile(s: GameState, x: number, z: number, team: Team = 'hero'): boolean {
   if (s.theme !== 'forest') return true;
-  return living(s, 'hero').some(v => dist(v.x, v.z, x, z) <= BALANCE.sight.forestHero + 0.01);
+  return living(s, team).some(v => dist(v.x, v.z, x, z) <= BALANCE.sight.forestHero + 0.01);
 }
 
 /* ---------- Movement ---------- */
@@ -169,11 +182,11 @@ export function reachFrom(s: GameState, sx: number, sz: number, steps: number, s
       const t = tileAt(s, nx, nz);
       if (!t) continue;
       if (t.blocks.length && (!smash || hasWell(t))) continue;
-      // Goblins can't climb a Watchtower; a Troll knocks it down
-      if (t.tower && self.team === 'gob' && !smash) continue;
+      // Enemies can't climb a Watchtower; a Troll knocks it down
+      if (t.tower && foeOf(s, t.tower, self) && !smash) continue;
       const occ = unitAt(s, nx, nz);
       if (occ && occ !== self) continue;
-      const d = cur.d + (t.blocks.length || (t.tower && self.team === 'gob') ? BALANCE.troll.wallStepCost : 1);
+      const d = cur.d + (t.blocks.length || (t.tower && foeOf(s, t.tower, self)) ? BALANCE.troll.wallStepCost : 1);
       if (d > steps) continue;
       const k = key(nx, nz);
       const old = out.get(k);
@@ -272,7 +285,7 @@ export function hitInfo(s: GameState, a: Unit, t: Unit, fx = a.x, fz = a.z, char
   if (C.range > 1 && d > BALANCE.longRange.from) chance -= Math.round((d - BALANCE.longRange.from) * BALANCE.longRange.penaltyPerTile);
   if (C.range > 1 && onTower(s, fx, fz)) chance += BALANCE.tower.aim;
   if (a.blessed) chance += BALANCE.bless;
-  if (a.team === 'gob') chance += BALANCE.difficulty[s.diff].goblinAim;
+  if (isGoblin(a.cls)) chance += BALANCE.difficulty[s.diff].goblinAim;
   let dmg = (C.dmg + (charging && C.charge ? C.charge.dmg : 0)) * (mods.mult ?? 1);
   if (C.range > 1) dmg = shielded(t, dmg);
   dmg = aura(s, t, dmg);
@@ -554,13 +567,13 @@ function moveAlong(s: GameState, u: Unit, path: { x: number; z: number }[]): { e
   for (const st of path) {
     const t = s.tiles[st.z][st.x];
     while (t.blocks.length) ev.push({ t: 'blockRemoved', x: st.x, z: st.z, mat: t.blocks.pop()!, cause: 'smash' });
-    if (t.tower && u.team === 'gob') { t.tower = undefined; ev.push({ t: 'tower', x: st.x, z: st.z, on: false }); }
+    if (t.tower && foeOf(s, t.tower, u)) { t.tower = undefined; ev.push({ t: 'tower', x: st.x, z: st.z, on: false }); }
     u.x = st.x; u.z = st.z;
     ev.push({ t: 'step', id: u.id, x: st.x, z: st.z });
     if (t.fire > 0) damage(s, u, BALANCE.fire.burnDamage, 'Burn -' + BALANCE.fire.burnDamage, 'fire', ev);
     if (!u.alive || s.winner) break;
-    // A Ranger's Snare: damage, and the goblin stops here
-    if (t.trap && u.team === 'gob') {
+    // A Ranger's Snare: damage, and the enemy stops here
+    if (t.trap && foeOf(s, t.trap, u)) {
       const by = unitById(s, t.trap) ?? undefined;
       t.trap = undefined;
       ev.push({ t: 'trap', x: st.x, z: st.z, on: false, sprung: u.id });
@@ -821,6 +834,9 @@ export function endPlayerTurn(s: GameState): GameEvent[] {
   if (s.phase !== 'player') return [];
   const ev = turretsFire(s, 'hero');
   if (s.winner) return ev;
+  // A Duel squad's TNT on the far side goes off once the near side has moved
+  explodeTnt(s, 'gob', ev);
+  if (s.winner) return ev;
   s.phase = 'enemy';
   for (const h of living(s, 'hero')) { h.ap = 0; h.rooted = false; }
   ev.push(...startSide(s, 'gob'));
@@ -862,18 +878,25 @@ function meltTick(s: GameState): GameEvent[] {
   return ev;
 }
 
-export function endEnemyTurn(s: GameState): GameEvent[] {
-  if (s.phase === 'over') return [];
-  const ev = fireTick(s);
-  if (s.winner) return ev;
-  // Lit TNT goes off once the goblins have moved
-  for (const t of s.units.filter(u => u.alive && u.cls === 'tnt')) {
+function explodeTnt(s: GameState, team: Team, ev: GameEvent[]) {
+  for (const t of s.units.filter(u => u.alive && u.cls === 'tnt' && u.team === team)) {
     if (s.winner) break;
     if (t.alive) damage(s, t, t.hp, 'Boom', 'ability', ev, t);
   }
+}
+
+export function endEnemyTurn(s: GameState): GameEvent[] {
+  if (s.phase === 'over') return [];
+  // The far side's Turrets and Watchtowers (a Duel squad's) fire at the end of its turn
+  const ev = turretsFire(s, 'gob');
+  if (s.winner) return ev;
+  ev.push(...fireTick(s));
+  if (s.winner) return ev;
+  // Lit TNT goes off once the goblins have moved
+  explodeTnt(s, 'hero', ev);
   if (s.winner) return ev;
   ev.push(...meltTick(s));
-  for (const g of living(s, 'gob')) g.rooted = false;
+  for (const g of living(s, 'gob')) { g.ap = 0; g.rooted = false; }
   s.turn++;
   s.phase = 'player';
   ev.push(...startSide(s, 'hero'));

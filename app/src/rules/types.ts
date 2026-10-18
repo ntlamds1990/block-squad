@@ -41,6 +41,7 @@ export interface Unit {
   rooted?: boolean;  // can't move this turn
   blessed?: boolean; // next attack gets a bonus to hit
   gear?: ItemId[];    // items the hero carries (campaign and practice)
+  player?: number;    // two-phone games: which player controls this hero (0 = whoever made the room, 1 = who joined)
   secondWind?: boolean; // Ring of Second Wind not used yet this battle
   potion?: number;      // Healing Potion not drunk yet: hearts it heals
   potionUsed?: boolean;
@@ -57,8 +58,19 @@ export interface GameState {
   winner: Team | null;
   rng: Rng;
   nextId: number;
-  mode?: 'campaign' | 'practice';
+  mode?: GameMode;
   battleId?: number;
+  match?: MatchInfo; // two-phone games
+}
+
+// campaign and practice are solo; duel and coop are played on two phones
+export type GameMode = 'campaign' | 'practice' | 'duel' | 'coop';
+
+export interface MatchInfo {
+  names: [string, string];   // player 0 (made the room) and player 1 (joined)
+  teams: [Team, Team];       // Duel: the side each player commands. Co-op: both 'hero'
+  seq: number;               // moves made so far, so two phones can tell which save is newer
+  fair?: boolean;            // Duel: equal level-1 squads with no gear
 }
 
 export type AttackKind = 'melee' | 'arrow' | 'bolt' | 'light' | 'hex' | 'frost';

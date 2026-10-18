@@ -153,8 +153,9 @@ export function squadMembers(c: Campaign): SquadMember[] {
 export const placeName = (t: Theme) => (t === 'forest' ? 'the Dark Forest' : 'the village');
 
 // After a campaign battle: XP for survivors, the fallen go on the wall, and gold for the Barracks
-export function applyBattle(c: Campaign, s: GameState, rand: () => number = Math.random): BattleReport | null {
-  if (s.mode !== 'campaign' || s.phase !== 'over' || (s.battleId !== undefined && c.lastBattle === s.battleId)) return null;
+// In co-op, `player` picks out this phone's heroes: each player's own Barracks gets its own results.
+export function applyBattle(c: Campaign, s: GameState, rand: () => number = Math.random, player?: number): BattleReport | null {
+  if ((s.mode !== 'campaign' && s.mode !== 'coop') || s.phase !== 'over' || (s.battleId !== undefined && c.lastBattle === s.battleId)) return null;
   c.lastBattle = s.battleId;
   const won = s.winner === 'hero';
   const goblins = s.units.filter(u => u.team === 'gob' && !u.alive).length;
@@ -165,7 +166,7 @@ export function applyBattle(c: Campaign, s: GameState, rand: () => number = Math
   const heroes: HeroReport[] = [];
   const gearBack: ItemId[] = [], gearLost: ItemId[] = [], potions: string[] = [];
   for (const u of s.units) {
-    if (u.team !== 'hero' || !u.heroId) continue;
+    if (u.team !== 'hero' || !u.heroId || (s.mode === 'coop' && u.player !== player)) continue;
     const h = c.heroes.find(x => x.id === u.heroId);
     if (!h) continue;
     const kills = u.kills ?? 0;
@@ -197,6 +198,15 @@ export function applyBattle(c: Campaign, s: GameState, rand: () => number = Math
   }
   const freeRecruits = ensureSquad(c, rand);
   return { won, gold, goblins, heroes, freeRecruits, loot, lootSold, gearBack, gearLost, potions };
+}
+
+// After a Duel: nobody is lost, and the winner's Barracks gets a little gold
+export function applyDuel(c: Campaign, s: GameState, player: number): number | null {
+  if (s.mode !== 'duel' || s.phase !== 'over' || !s.match || (s.battleId !== undefined && c.lastBattle === s.battleId)) return null;
+  c.lastBattle = s.battleId;
+  const won = s.winner === s.match.teams[player];
+  if (won) c.gold += PROGRESS.gold.duelWin;
+  return won ? PROGRESS.gold.duelWin : 0;
 }
 
 export function parseCampaign(json: string | null): Campaign | null {

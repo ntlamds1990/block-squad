@@ -10,8 +10,10 @@ interface Colors { skin: string; legs: string; body: string; arms: string; eye?:
 const ringGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.04, 24);
 const heroRing = new THREE.MeshBasicMaterial({ color: 0x4c9bff, transparent: true, opacity: 0.85 });
 const gobRing = new THREE.MeshBasicMaterial({ color: 0xe2553f, transparent: true, opacity: 0.85 });
+const allyRing = new THREE.MeshBasicMaterial({ color: 0x3fd0a0, transparent: true, opacity: 0.85 });
 
-export function buildModel(cls: ClassId, team: 'hero' | 'gob', small = false): Model {
+// `ring`: blue for your own units, red for enemies, gold for a co-op partner's heroes
+export function buildModel(cls: ClassId, ring: 'hero' | 'gob' | 'ally', small = false): Model {
   const group = new THREE.Group();
   const body = new THREE.Group();
   group.add(body);
@@ -157,9 +159,9 @@ export function buildModel(cls: ClassId, team: 'hero' | 'gob', small = false): M
       body.scale.setScalar(1.15);
       break;
   }
-  const ring = new THREE.Mesh(ringGeo, team === 'hero' ? heroRing : gobRing);
-  ring.position.y = 0.03;
-  group.add(ring);
+  const base = new THREE.Mesh(ringGeo, ring === 'hero' ? heroRing : ring === 'ally' ? allyRing : gobRing);
+  base.position.y = 0.03;
+  group.add(base);
   return { group, body, mats };
 }
 

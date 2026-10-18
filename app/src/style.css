@@ -358,3 +358,52 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 }
 #app.offField #top, #app.offField #panel { display: none; }
 #camp .row3 .btn { font-size: 15px; padding: 8px 4px; }
+
+/* Play together: two phones */
+:root { --ally: #3fd0a0; }
+.hp.ally { border-color: var(--ally); }
+.chip.ally { opacity: 0.8; border-color: var(--ally); }
+.chip.ally:disabled { opacity: 0.7; }
+#together input, .joinBox input {
+  font: 700 17px var(--body);
+  background: var(--chip); color: var(--ink);
+  border: 2px solid var(--line); border-radius: 10px;
+  padding: 10px 12px; width: 100%; box-sizing: border-box;
+}
+#together input:focus { outline: none; border-color: var(--gold); }
+.joinBox { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.joinBox input { font-family: var(--display); font-size: 26px; letter-spacing: 0.3em; text-align: center; text-transform: uppercase; }
+.roomCode {
+  font-family: var(--display);
+  font-size: 64px;
+  letter-spacing: 0.25em;
+  text-align: center;
+  color: var(--gold);
+  text-shadow: 0 4px 0 #000;
+  padding-left: 0.25em;
+}
+.spinner { text-align: center; font-size: 20px; color: var(--muted); animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+.seg.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.seg .btn:disabled.on { opacity: 1; }
+#lobbyPeer small { color: var(--muted); }
+#lobbyPeer .ok, #lobbyStatus .ok { color: var(--leaf); font-weight: 800; }
+#lobbyReady.on { background: #2a2f52; color: var(--ink); }
+.endBtns .btn[hidden] { display: none; }
+.endBtns:has(#rematchBtn[hidden]) { grid-template-columns: 1fr; }
+#netBar {
+  position: absolute;
+  left: 50%; top: 58px;
+  transform: translateX(-50%);
+  max-width: calc(100% - 32px);
+  box-sizing: border-box;
+  display: flex; align-items: center; gap: 8px;
+  background: rgba(18, 23, 42, 0.94);
+  border: 2px solid var(--ember);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 14px;
+  z-index: 5;
+}
+#netBar[hidden] { display: none; }
+#netBar .btn { font-size: 13px; padding: 6px 10px; }

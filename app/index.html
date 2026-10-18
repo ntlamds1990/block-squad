@@ -28,6 +28,7 @@
     </div>
   </header>
   <div id="banner"></div>
+  <div id="netBar" role="status" hidden><span id="netText"></span><button class="btn" id="netRetry" type="button" hidden>Try again</button></div>
   <div id="coach" hidden role="status">
     <div class="who" aria-hidden="true">🧙</div>
     <div id="coachText"></div>
@@ -58,6 +59,11 @@
         <div class="saveInfo" id="saveInfo"></div>
       </div>
       <button class="btn" id="newBtn" type="button">Camp<small>Your heroes, gear and the next battle</small></button>
+      <div class="stack" id="continueTogetherBox" hidden>
+        <button class="btn primary" id="continueTogetherBtn" type="button">Continue together</button>
+        <div class="saveInfo" id="matchInfo"></div>
+      </div>
+      <button class="btn" id="togetherBtn" type="button">📱📱 Play together<small>Co-op or Duel on two phones</small></button>
       <button class="btn" id="practiceBtn" type="button">Practice battle<small>Any heroes and paths, nothing to lose</small></button>
       <button class="btn quiet" id="musicBtn" type="button" aria-pressed="true">🎵 Music: on</button>
     </div>
@@ -197,12 +203,83 @@
     </div>
   </div>
 
+  <div class="overlay" id="together" hidden>
+    <div class="card">
+      <h2>Play together</h2>
+      <p class="muted">Two phones in the same room. One phone makes a game and gets a code; the other joins with it. No sign-in.</p>
+      <div class="stack">
+        <label class="lbl" for="myName">Your name</label>
+        <input type="text" id="myName" maxlength="12" placeholder="Your name" autocomplete="nickname">
+      </div>
+      <button class="btn primary" id="hostBtn" type="button">Make a game<small>Get a room code to share</small></button>
+      <button class="btn" id="joinOpenBtn" type="button">Join a game<small>Type the code from the other phone</small></button>
+      <div class="joinBox" id="joinBox" hidden>
+        <input type="text" id="joinCode" maxlength="4" placeholder="CODE" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Room code">
+        <button class="btn primary" id="joinBtn" type="button">Join</button>
+      </div>
+      <div class="classInfo" id="tgNote" role="status"></div>
+      <button class="btn quiet" id="togetherBack" type="button">Back</button>
+    </div>
+  </div>
+
+  <div class="overlay" id="lobby" hidden>
+    <div class="card wide">
+      <div id="lobbyWait">
+        <h2>Room code</h2>
+        <div class="roomCode" id="roomCode" aria-live="polite">----</div>
+        <p class="spinner" aria-hidden="true">📱 · · · 📱</p>
+      </div>
+      <div id="lobbySetup" hidden>
+        <h2 id="lobbyTitle">Play together</h2>
+        <div class="stack">
+          <label class="lbl">Game</label>
+          <div class="seg two" role="group" aria-label="Game">
+            <button class="btn" data-kind="coop" type="button">🤝 Co-op<small>Team up vs goblins</small></button>
+            <button class="btn" data-kind="duel" type="button">⚔️ Duel<small>Squad vs squad</small></button>
+          </div>
+          <p class="muted" id="kindNote"></p>
+        </div>
+        <div class="stack">
+          <label class="lbl">Map</label>
+          <div class="seg" role="group" aria-label="Map">
+            <button class="btn" data-lmap="village" type="button">Village<small>Fire and a well</small></button>
+            <button class="btn" data-lmap="forest" type="button">Dark Forest<small>Fog</small></button>
+            <button class="btn" data-lmap="random" type="button">Surprise<small>Either one</small></button>
+          </div>
+        </div>
+        <div class="stack" id="lobbyDiffBox">
+          <label class="lbl">Goblins</label>
+          <div class="seg" role="group" aria-label="Difficulty">
+            <button class="btn" data-ldiff="easy" type="button">Easy</button>
+            <button class="btn" data-ldiff="normal" type="button">Normal</button>
+            <button class="btn" data-ldiff="hard" type="button">Hard</button>
+          </div>
+        </div>
+        <label class="toggle" id="fairBox"><input type="checkbox" id="fairToggle"> Fair fight: everyone level 1, no gear</label>
+        <p class="muted" id="lobbyHostNote" hidden></p>
+        <div class="stack">
+          <label class="lbl" id="lobbyPickLbl">Bring 2 heroes</label>
+          <div class="heroes" id="lobbyHeroes"></div>
+        </div>
+        <div class="classInfo" id="lobbyPeer"></div>
+      </div>
+      <div class="classInfo" id="lobbyStatus" role="status"></div>
+      <div class="row2">
+        <button class="btn" id="lobbyLeave" type="button">Leave</button>
+        <button class="btn primary" id="lobbyReady" type="button">Ready</button>
+      </div>
+    </div>
+  </div>
+
   <div class="overlay" id="end" hidden>
     <div class="card">
       <h2 id="endTitle">Victory!</h2>
       <p id="endText"></p>
       <div class="report" id="endReport"></div>
-      <button class="btn primary" id="againBtn" type="button">Play again</button>
+      <div class="row2 endBtns">
+        <button class="btn" id="rematchBtn" type="button" hidden>Play again together</button>
+        <button class="btn primary" id="againBtn" type="button">Play again</button>
+      </div>
     </div>
   </div>
 </div>

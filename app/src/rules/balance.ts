@@ -246,7 +246,7 @@ export const PROGRESS = {
   levelXp: [0, 3, 7],     // XP needed for level 1, 2 and 3
   levelHp: { 2: 1 } as Record<number, number>, // extra hearts from reaching a level
   promoteAt: 3,
-  gold: { win: 30, perGoblin: 5, loss: 10, start: 0 },
+  gold: { win: 30, perGoblin: 5, loss: 10, start: 0, duelWin: 20 },
   recruitCost: 25,
   maxRoster: 8,
   squadSize: 4,

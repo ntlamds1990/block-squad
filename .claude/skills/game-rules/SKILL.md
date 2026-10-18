@@ -54,6 +54,12 @@ All numbers in `PROGRESS` in `balance.ts`; paths in `PATHS` / `PATHS_OF`.
 - A fallen hero's gear goes back to the stash after a win and is lost after a defeat.
 - `BALANCE.adaptive`: squad power = levels above 1 + promotions + gear (common 1, rare 1.5, epic 2.5); every 3.5 points adds an extra goblin (max 9). Target: Normal stays roughly 55–75% from fresh to fully geared squads.
 
+## Two phones (Duel and Co-op)
+
+- `match.ts`: every move is an `Act`; both phones run `applyAct` with the same acts in the same order, so the game must stay deterministic (all randomness from `s.rng`). The host phone checks the other phone's acts with `actAllowed`, plays the goblins (`ai` acts carry the dice value after choosing), and ends finished turns. `stateHash` spots drift; the joiner then asks for the full state.
+- `s.match`: names and `teams` per player (0 made the room, 1 joined) and `seq`. Co-op heroes carry `player`; each phone's Barracks gets its own results (`applyBattle(..., player)`), with permadeath. Duel: the second squad is team `gob` made of heroes; goblin-only rules check the class (`isGoblin`), and towers and snares work against whoever is the builder's enemy (`foeOf`). The far squad's TNT goes off after the near side's turn; its Turrets and Watchtowers fire at the end of its own turn. Duels change nothing but `PROGRESS.gold.duelWin` for the winner.
+- Link: PeerJS (`net/link.ts`), room id `blocksquad-v1-<CODE>`. Tests run a local server and open the game with `?peer=127.0.0.1:9000`.
+
 ## After changing rules or balance
 
 1. Add or update a test in `tests/` for the rule.
