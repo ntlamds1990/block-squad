@@ -1584,9 +1584,11 @@ function gotLobby(l: Lobby) {
   const kindChanged = !lobby || lobby.kind !== l.kind;
   lobby = l;
   net.partner = l.names[0];
-  if (kindChanged || myPicks.length !== pickCount() || !myPicks.every(id => camp.heroes.some(h => h.id === id))) myPicks = defaultPicks(pickCount());
-  // New game type: tell the host which heroes we bring now
-  if (kindChanged || l.picks[1].length !== myPicks.length) net.link?.send({ t: 'pick', squad: pickedMembers(), ready: l.ready[1] });
+  // Only a new game type resets the picks; the host echoing our own picks back must not undo a tap
+  if (kindChanged || myPicks.length > pickCount() || !myPicks.every(id => camp.heroes.some(h => h.id === id))) {
+    myPicks = defaultPicks(pickCount());
+    net.link?.send({ t: 'pick', squad: pickedMembers(), ready: false });
+  }
   if ($('lobby').hidden) showLobby();
   else renderLobby();
 }
